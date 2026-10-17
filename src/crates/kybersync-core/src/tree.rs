@@ -466,6 +466,12 @@ impl Tree {
         Ok(t)
     }
 
+    /// Ids of every commit applied so far (snapshots carry them too, so a
+    /// snapshot that continues this history contains all of them).
+    pub fn seen(&self) -> impl Iterator<Item = &[u8; 16]> {
+        self.seen.iter()
+    }
+
     /// Every chunk a live file (conflict copies included) refers to.
     pub fn live_chunks(&self) -> HashSet<ChunkId> {
         self.nodes.values().filter(|n| n.entry.kind == Kind::File).flat_map(|n| n.entry.chunks.iter().copied()).collect()
