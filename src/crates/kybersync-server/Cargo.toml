@@ -1,0 +1,36 @@
+[package]
+name = "kybersync-server"
+description = "Zero-knowledge blob + commit-log server for kybersync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+blake3.workspace = true
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+kybersync-core = { path = "../kybersync-core" }
+futures = "0.3"
+hex.workspace = true
+object_store = { version = "0.14", features = ["aws"] }
+serde.workspace = true
+serde_json.workspace = true
+subtle = "2"
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

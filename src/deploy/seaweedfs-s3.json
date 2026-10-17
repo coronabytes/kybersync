@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "kybersync",
+      "credentials": [{ "accessKey": "kybersync", "secretKey": "kybersync-secret-change-me" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

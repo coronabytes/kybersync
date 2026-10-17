@@ -1,0 +1,53 @@
+[package]
+name = "kybersync-client"
+description = "kybersync Windows client: encrypted WinFsp drive with sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kybersync"
+path = "src/bin/kybersync/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+kybersync-core = { path = "../kybersync-core" }
+egui = "0.37"
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
+futures = "0.3"
+hex.workspace = true
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+reqwest = { version = "0.13", features = ["json"] }
+rfd = "0.17"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26"
+winfsp = { version = "0.13", features = ["system"] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winfsp = { version = "0.13", default-features = false, features = ["delayload"] }
+
+[dev-dependencies]
+tempfile = "3"

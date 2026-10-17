@@ -1,0 +1,4 @@
+target
+.git
+**/*.json.tmp
+*-recovery-kit.json

@@ -1,0 +1,78 @@
+# Local filesystem storage (default):
+#   KYBERSYNC_ADMIN_TOKEN=$(openssl rand -hex 24) docker compose up -d
+#
+# S3-compatible storage (SeaweedFS example; any S3 API works, e.g. AWS,
+# Cloudflare R2, Backblaze B2, Garage, Ceph RGW):
+#   KYBERSYNC_ADMIN_TOKEN=... docker compose --profile s3 up -d
+#
+# Put a TLS-terminating reverse proxy in front for internet exposure, or set
+# KYBERSYNC_TLS_CERT / KYBERSYNC_TLS_KEY to let the server terminate TLS itself
+# (rustls with hybrid X25519MLKEM768 post-quantum key exchange).
+
+services:
+  kybersync:
+    build: .
+    image: kybersync-server:latest
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    environment:
+      KYBERSYNC_ADMIN_TOKEN: ${KYBERSYNC_ADMIN_TOKEN:?set KYBERSYNC_ADMIN_TOKEN}
+      KYBERSYNC_STORAGE: fs
+      RUST_LOG: info
+      # Automatic maintenance policy (devices do the work, one at a time):
+      # KYBERSYNC_COMPACT_AFTER: 1000          # commits after the latest snapshot
+      # KYBERSYNC_GC_INTERVAL_HOURS: 24        # blob cleanup interval (0: off)
+      # KYBERSYNC_GC_GRACE_HOURS: 168          # keep unreferenced blobs this long
+      # KYBERSYNC_SWEEP_INTERVAL_MINUTES: 10   # server housekeeping
+      # KYBERSYNC_TLS_CERT: /certs/fullchain.pem
+      # KYBERSYNC_TLS_KEY: /certs/privkey.pem
+    volumes:
+      - kybersync-data:/data
+      # - ./certs:/certs:ro
+
+  kybersync-s3:
+    profiles: ["s3"]
+    build: .
+    image: kybersync-server:latest
+    restart: unless-stopped
+    ports:
+      - "8444:8443"
+    environment:
+      KYBERSYNC_ADMIN_TOKEN: ${KYBERSYNC_ADMIN_TOKEN:?set KYBERSYNC_ADMIN_TOKEN}
+      KYBERSYNC_STORAGE: s3
+      KYBERSYNC_S3_BUCKET: kybersync
+      AWS_ENDPOINT: http://seaweedfs:8333
+      AWS_ALLOW_HTTP: "true"
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: kybersync
+      AWS_SECRET_ACCESS_KEY: kybersync-secret-change-me
+      AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"
+    depends_on:
+      s3-bucket:
+        condition: service_completed_successfully
+
+  seaweedfs:
+    profiles: ["s3"]
+    image: chrislusf/seaweedfs:4.48
+    command: server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    volumes:
+      - seaweedfs-data:/data
+      - ./deploy/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+
+  s3-bucket:
+    profiles: ["s3"]
+    image: chrislusf/seaweedfs:4.48
+    depends_on: [seaweedfs]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for i in $$(seq 1 60); do
+          echo "s3.bucket.create -name kybersync" | weed shell -master=seaweedfs:9333 2>&1 | grep -qiE "created|exist" && exit 0
+          sleep 2
+        done
+        exit 1
+
+volumes:
+  kybersync-data:
+  seaweedfs-data:
