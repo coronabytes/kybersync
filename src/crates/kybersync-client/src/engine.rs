@@ -1010,13 +1010,33 @@ impl Engine {
         Ok(true)
     }
 
+    /// The cached blob of `id`, checked to really be that chunk before it
+    /// goes to the server: a corrupt upload would be unreadable on every
+    /// device for good. A corrupt blob is rewritten from the plaintext cache
+    /// if that still holds the chunk, otherwise evicted and reported.
+    fn verified_blob(&self, id: &ChunkId) -> Result<Vec<u8>> {
+        let ring = self.ring();
+        let blob = self.cache.read(id)?.ok_or_else(|| anyhow!("chunk {id:?} missing from local cache; cannot upload"))?;
+        if crypto::decrypt_chunk(&ring, id, &blob).is_ok() {
+            return Ok(blob);
+        }
+        self.cache.remove(id);
+        let plain = self.plain.lock().unwrap().iter().find(|(i, _)| i == id).map(|(_, d)| d.clone());
+        if let Some(pt) = plain {
+            let (fresh, blob) = crypto::encrypt_chunk(&ring, &pt);
+            if fresh == *id {
+                tracing::warn!("cached chunk {id:?} was corrupt; rewritten from memory");
+                self.cache.write(id, &blob)?;
+                return Ok(blob);
+            }
+        }
+        Err(anyhow!("cached chunk {id:?} is corrupt and its contents are gone; evicted it (the file must be written again)"))
+    }
+
     async fn upload_chunks(&self, ids: Vec<ChunkId>) -> Result<()> {
         let results: Vec<Result<()>> = futures::stream::iter(ids)
             .map(|id| async move {
-                let blob = self
-                    .cache
-                    .read(&id)?
-                    .ok_or_else(|| anyhow!("chunk {id:?} missing from local cache; cannot upload"))?;
+                let blob = self.verified_blob(&id)?;
                 let len = blob.len() as u64;
                 self.api.put_blob(&id, blob).await?;
                 let mut t = self.transfers.lock().unwrap();
@@ -1042,7 +1062,26 @@ impl Engine {
             if crypto::record_epoch(&blob) == Some(ring.epoch()) {
                 continue;
             }
-            let pt = crypto::decrypt_chunk(&ring, id, &blob).context("re-encrypting chunk")?;
+            let pt = match crypto::decrypt_chunk(&ring, id, &blob) {
+                Ok(pt) => pt,
+                Err(e) => {
+                    // Don't fail on it forever: evict, and recover the contents
+                    // from the plaintext cache if they are still there.
+                    self.cache.remove(id);
+                    let plain = self.plain.lock().unwrap().iter().find(|(i, _)| i == id).map(|(_, d)| d.clone());
+                    match plain {
+                        Some(pt) => {
+                            tracing::warn!("cached chunk {id:?} was corrupt; re-encrypted from memory");
+                            (*pt).clone()
+                        }
+                        None => {
+                            return Err(anyhow!(e).context(format!(
+                                "cached chunk {id:?} is corrupt and its contents are gone; evicted it (the file must be written again)"
+                            )));
+                        }
+                    }
+                }
+            };
             let (new, blob) = crypto::encrypt_chunk(&ring, &pt);
             self.cache.write(&new, &blob)?;
             map.insert(*id, new);
