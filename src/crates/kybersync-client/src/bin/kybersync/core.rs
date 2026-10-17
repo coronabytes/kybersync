@@ -5,7 +5,7 @@
 use crate::icon::Light;
 use crate::jobs::Job;
 use anyhow::{Result, anyhow};
-use kybersync_client::config::{Config, Profile, vault_dir};
+use kybersync_client::config::{Config, Profile, remove_vault_folder, vault_dir};
 use kybersync_client::engine::{Engine, Status};
 use kybersync_client::progress::SyncProgress;
 use kybersync_client::fs::{Mount, mount};
@@ -387,8 +387,11 @@ impl Core {
         let mut cfg = Config::load()?;
         cfg.vaults.retain(|p| p.vault != v.profile.vault);
         cfg.save()?;
-        let _ = std::fs::remove_dir_all(v.profile.chunk_cache_dir());
-        let _ = std::fs::remove_dir_all(vault_dir(&v.profile.vault));
+        for dir in [v.profile.chunk_cache_dir(), vault_dir(&v.profile.vault)] {
+            if let Err(e) = remove_vault_folder(&dir, &v.profile.vault) {
+                tracing::warn!("removing local data of {}: {e:#}", v.profile.vault);
+            }
+        }
         self.vaults_changed = true;
         tracing::info!(vault = v.profile.vault, "removed from this device");
         Ok(())

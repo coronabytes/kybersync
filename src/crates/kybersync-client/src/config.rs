@@ -89,6 +89,34 @@ pub fn vault_dir(vault: &str) -> PathBuf {
     data_dir().join(vault)
 }
 
+/// Vault ids come from the server, invites and recovery kits, and name local
+/// folders, so anything but the server's own grammar is refused here.
+pub fn check_vault_id(vault: &str) -> Result<()> {
+    if !kybersync_core::proto::valid_vault_id(vault) {
+        bail!("invalid vault name {vault:?}: must be 1-64 chars of a-z, 0-9, '-' or '_'");
+    }
+    Ok(())
+}
+
+/// Delete a vault's local folder (`<data>\<vault>`, `<chunks>\<vault>` or
+/// `<data>\<vault>\chunks`): only an absolute path whose last component is
+/// a valid vault id (or `chunks` right below one) is ever removed, whatever a
+/// profile says, so a bad vault name can't turn this into deleting an
+/// arbitrary directory. A missing folder is not an error.
+pub fn remove_vault_folder(dir: &Path, vault: &str) -> Result<()> {
+    check_vault_id(vault)?;
+    let named = |p: &Path, n: &str| p.file_name().is_some_and(|f| f == n);
+    let is_vault_folder = named(dir, vault) || (named(dir, "chunks") && dir.parent().is_some_and(|p| named(p, vault)));
+    if !dir.is_absolute() || !is_vault_folder {
+        bail!("refusing to delete {}: not a vault folder", dir.display());
+    }
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("deleting {}", dir.display())),
+    }
+}
+
 /// Whether two paths name the same folder (both must exist to tell for sure).
 pub fn same_dir(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
@@ -108,11 +136,21 @@ impl Config {
     }
 
     pub fn load() -> Result<Self> {
-        match std::fs::read(Self::path()) {
-            Ok(b) => serde_json::from_slice(&b).context("parsing config.json"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e).context("reading config.json"),
-        }
+        let mut cfg: Self = match std::fs::read(Self::path()) {
+            Ok(b) => serde_json::from_slice(&b).context("parsing config.json")?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(e).context("reading config.json"),
+        };
+        // A profile with a bad vault name (an older client accepted any) would
+        // name local folders it must not touch; leave it out entirely.
+        cfg.vaults.retain(|p| match check_vault_id(&p.vault) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("ignoring configured vault: {e}");
+                false
+            }
+        });
+        Ok(cfg)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -142,6 +180,7 @@ impl Config {
 
 impl Profile {
     pub fn new(vault: &str, server: &str, device_name: &str, secret: &DeviceSecret) -> Result<Self> {
+        check_vault_id(vault)?;
         let device_id = secret.public()?.device_id();
         Ok(Self {
             vault: vault.into(),
@@ -258,6 +297,42 @@ pub mod dpapi {
 
     pub fn unprotect(data: &[u8]) -> Result<Vec<u8>> {
         run(data, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_vault_folders_are_removed() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path();
+        for (vault, dir) in [("v", data.join("v")), ("v", data.join("v").join("chunks")), ("my-vault_1", data.join("my-vault_1"))] {
+            std::fs::create_dir_all(&dir).unwrap();
+            remove_vault_folder(&dir, vault).unwrap();
+            assert!(!dir.exists());
+        }
+        // A folder that is already gone is fine.
+        remove_vault_folder(&data.join("v"), "v").unwrap();
+        // Anything else is refused and left alone, whatever the profile says.
+        let other = data.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(remove_vault_folder(&other, "v").is_err());
+        assert!(remove_vault_folder(data, "v").is_err());
+        assert!(remove_vault_folder(&data.join("C:\\"), "C:\\").is_err());
+        assert!(remove_vault_folder(&data.join(".."), "..").is_err());
+        assert!(remove_vault_folder(Path::new("v"), "v").is_err());
+        assert!(other.exists() && data.exists());
+    }
+
+    #[test]
+    fn profiles_need_a_valid_vault_name() {
+        let secret = DeviceSecret::generate();
+        assert!(Profile::new("ok-1", "https://s", "n", &secret).is_ok());
+        for bad in ["C:\\", "..\\..", "a/b", "", "Up"] {
+            assert!(Profile::new(bad, "https://s", "n", &secret).is_err(), "accepted {bad:?}");
+        }
     }
 }
 

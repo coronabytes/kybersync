@@ -59,6 +59,9 @@ const LOCAL_COMPACT_AFTER: u64 = 2000;
 /// Queued change notifications beyond this are dropped (Explorer then only
 /// catches up on refresh).
 const MAX_FS_CHANGES: usize = 20_000;
+/// File in the vault dir holding why sync was stopped (see
+/// [`Engine::halt_if_diverged`]); present until the vault is removed.
+const DIVERGED_MARKER: &str = "diverged";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Pending {
@@ -372,6 +375,10 @@ impl Engine {
             stop: watch::channel(false).0,
             rt: rt.clone(),
         });
+        if let Ok(reason) = std::fs::read_to_string(engine.dir.join(DIVERGED_MARKER)) {
+            engine.diverged.store(true, Ordering::SeqCst);
+            engine.set_offline(&format!("{}; sync stopped", reason.trim()));
+        }
         rt.spawn(engine.clone().fetch_loop());
         rt.spawn(engine.clone().upload_loop());
         rt.spawn(engine.clone().chunk_loop());
@@ -504,6 +511,12 @@ impl Engine {
         }
         if !self.diverged.swap(true, Ordering::SeqCst) {
             tracing::error!("{e:#}; sync stopped");
+            // Remembered across restarts: otherwise the server could compact
+            // the history we refused and have the next start take its
+            // snapshot as if nothing had happened.
+            if let Err(w) = std::fs::write(self.dir.join(DIVERGED_MARKER), format!("{e:#}")) {
+                tracing::warn!("recording the divergence: {w}");
+            }
         }
         self.set_offline(&format!("{e:#}; sync stopped"));
         true
@@ -721,8 +734,13 @@ impl Engine {
         }
         let snap = Snapshot::decrypt(&self.ring(), &self.profile.vault, seq, &data).context("snapshot fails authentication")?;
         let tree = Tree::from_snapshot(&snap)?;
-        self.write_local_snapshot(seq, &data)?;
         let mut st = self.state.write().unwrap();
+        // Re-checked under the lock: a concurrent pull may have moved the head.
+        if seq <= st.chain.head {
+            return Ok(false);
+        }
+        check_snapshot(&st.chain, &st.confirmed, &snap)?;
+        self.write_local_snapshot(seq, &data)?;
         // The whole tree may change; snapshot every node on either side.
         let watched: Option<Vec<(NodeId, Option<Shown>)>> = self.fs_changes.lock().unwrap().is_some().then(|| {
             let ids: HashSet<NodeId> = st.view.nodes().chain(tree.nodes()).map(|n| n.entry.id).collect();
@@ -1010,13 +1028,33 @@ impl Engine {
         Ok(true)
     }
 
+    /// The cached blob of `id`, checked to really be that chunk before it
+    /// goes to the server: a corrupt upload would be unreadable on every
+    /// device for good. A corrupt blob is rewritten from the plaintext cache
+    /// if that still holds the chunk, otherwise evicted and reported.
+    fn verified_blob(&self, id: &ChunkId) -> Result<Vec<u8>> {
+        let ring = self.ring();
+        let blob = self.cache.read(id)?.ok_or_else(|| anyhow!("chunk {id:?} missing from local cache; cannot upload"))?;
+        if crypto::decrypt_chunk(&ring, id, &blob).is_ok() {
+            return Ok(blob);
+        }
+        self.cache.remove(id);
+        let plain = self.plain.lock().unwrap().iter().find(|(i, _)| i == id).map(|(_, d)| d.clone());
+        if let Some(pt) = plain {
+            let (fresh, blob) = crypto::encrypt_chunk(&ring, &pt);
+            if fresh == *id {
+                tracing::warn!("cached chunk {id:?} was corrupt; rewritten from memory");
+                self.cache.write(id, &blob)?;
+                return Ok(blob);
+            }
+        }
+        Err(anyhow!("cached chunk {id:?} is corrupt and its contents are gone; evicted it (the file must be written again)"))
+    }
+
     async fn upload_chunks(&self, ids: Vec<ChunkId>) -> Result<()> {
         let results: Vec<Result<()>> = futures::stream::iter(ids)
             .map(|id| async move {
-                let blob = self
-                    .cache
-                    .read(&id)?
-                    .ok_or_else(|| anyhow!("chunk {id:?} missing from local cache; cannot upload"))?;
+                let blob = self.verified_blob(&id)?;
                 let len = blob.len() as u64;
                 self.api.put_blob(&id, blob).await?;
                 let mut t = self.transfers.lock().unwrap();
@@ -1042,7 +1080,26 @@ impl Engine {
             if crypto::record_epoch(&blob) == Some(ring.epoch()) {
                 continue;
             }
-            let pt = crypto::decrypt_chunk(&ring, id, &blob).context("re-encrypting chunk")?;
+            let pt = match crypto::decrypt_chunk(&ring, id, &blob) {
+                Ok(pt) => pt,
+                Err(e) => {
+                    // Don't fail on it forever: evict, and recover the contents
+                    // from the plaintext cache if they are still there.
+                    self.cache.remove(id);
+                    let plain = self.plain.lock().unwrap().iter().find(|(i, _)| i == id).map(|(_, d)| d.clone());
+                    match plain {
+                        Some(pt) => {
+                            tracing::warn!("cached chunk {id:?} was corrupt; re-encrypted from memory");
+                            (*pt).clone()
+                        }
+                        None => {
+                            return Err(anyhow!(e).context(format!(
+                                "cached chunk {id:?} is corrupt and its contents are gone; evicted it (the file must be written again)"
+                            )));
+                        }
+                    }
+                }
+            };
             let (new, blob) = crypto::encrypt_chunk(&ring, &pt);
             self.cache.write(&new, &blob)?;
             map.insert(*id, new);
@@ -1661,6 +1718,30 @@ fn read_frames(path: &std::path::Path) -> Result<Vec<(u64, Vec<u8>)>> {
     Ok(read_frames_len(path)?.0)
 }
 
+/// Whether the server's snapshot may replace what this device replayed so
+/// far. Snapshots are sealed by an authorized device, but the server picks
+/// which one to serve and when (410): it must continue this device's history
+/// rather than another fork's, and must not roll the key epoch back (a
+/// revoked device still holds the old key and could seal a snapshot of its
+/// own under it). A snapshot that continues our history contains the id of
+/// every commit we applied, since snapshots carry the whole `seen` set. A
+/// fresh device (head 0) has no history to compare against; it only refuses
+/// an epoch rollback.
+fn check_snapshot(chain: &ChainState, confirmed: &Tree, snap: &Snapshot) -> Result<()> {
+    let diverged = |m: String| kybersync_core::Error::Diverged(format!("snapshot at #{} {m}", snap.seq));
+    if snap.epoch < chain.epoch {
+        return Err(diverged(format!("was written under retired key epoch {} (the log is at {})", snap.epoch, chain.epoch)).into());
+    }
+    if chain.head > 0 {
+        let seen: HashSet<[u8; 16]> = snap.seen.iter().copied().collect();
+        let missing = confirmed.seen().filter(|id| !seen.contains(*id)).count();
+        if missing > 0 {
+            return Err(diverged(format!("lacks {missing} commits this device already applied: it belongs to another history")).into());
+        }
+    }
+    Ok(())
+}
+
 /// Rebuild the confirmed tree from `snapshot.bin` (if any) plus the locally
 /// cached log frames after it, and the chain position that results.
 ///
@@ -1851,6 +1932,41 @@ mod snapshot_tests {
 
     fn log_len(dir: &std::path::Path) -> usize {
         std::fs::metadata(dir.join("log.bin")).unwrap().len() as usize
+    }
+
+    /// A server snapshot is only taken if it continues the history this
+    /// device accepted and doesn't roll the key epoch back.
+    #[test]
+    fn snapshot_must_continue_our_history_and_epoch() {
+        let diverged = |e: anyhow::Error| matches!(e.downcast_ref::<kybersync_core::Error>(), Some(kybersync_core::Error::Diverged(_)));
+        let (a, b) = (put(1, "a"), put(2, "b"));
+        let mut ours = Tree::new();
+        ours.apply_commit(1, &a);
+        ours.apply_commit(2, &b);
+        let chain = ChainState { head: 2, last: Some([1; 32]), epoch: 1 };
+
+        // Further along the same history: carries both of our commit ids.
+        let mut ahead = ours.snapshot(5);
+        ahead.epoch = 1;
+        check_snapshot(&chain, &ours, &ahead).unwrap();
+
+        // Another fork lacks a commit we applied.
+        let mut fork = Tree::new();
+        fork.apply_commit(1, &a);
+        fork.apply_commit(2, &put(3, "c"));
+        let mut other = fork.snapshot(5);
+        other.epoch = 1;
+        assert!(diverged(check_snapshot(&chain, &ours, &other).unwrap_err()));
+
+        // An older key epoch is refused even when the history matches
+        // (a revoked device could have sealed it).
+        let old = Snapshot { epoch: 0, ..ahead.clone() };
+        assert!(diverged(check_snapshot(&chain, &ours, &old).unwrap_err()));
+
+        // A fresh device has no history to compare, but still no rollback.
+        let fresh = ChainState { epoch: 1, ..ChainState::GENESIS };
+        check_snapshot(&fresh, &Tree::new(), &other).unwrap();
+        assert!(diverged(check_snapshot(&fresh, &Tree::new(), &old).unwrap_err()));
     }
 
     /// Local state after compaction: snapshot.bin plus only the newer frames

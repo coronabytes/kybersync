@@ -42,7 +42,7 @@ impl ChunkCache {
             return Ok(());
         }
         std::fs::create_dir_all(path.parent().unwrap())?;
-        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        let tmp = tmp_path(&path);
         std::fs::write(&tmp, blob)?;
         match std::fs::rename(&tmp, &path) {
             Ok(()) => Ok(()),
@@ -117,6 +117,15 @@ impl ChunkCache {
     }
 }
 
+/// A temp name no other writer in this process uses. Two threads storing the
+/// same chunk at once (all-zero chunks are common) must not share one temp
+/// file, or the rename could publish an interleaving of two ciphertexts.
+fn tmp_path(path: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_extension(format!("tmp{}-{n}", std::process::id()))
+}
+
 fn is_kept(path: &Path, keep: &HashSet<ChunkId>) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
@@ -158,7 +167,9 @@ pub fn move_chunk_dir(vault: &str, to: Option<&Path>, progress: &dyn Fn(u64, u64
     }
     cfg.save()?;
     if old.exists() && !same_dir(&old, &new) {
-        let _ = std::fs::remove_dir_all(&old);
+        if let Err(e) = config::remove_vault_folder(&old, vault) {
+            tracing::warn!("removing the old chunk folder: {e:#}");
+        }
     }
     Ok(new)
 }
@@ -224,6 +235,13 @@ mod tests {
         let mut v: Vec<_> = ChunkCache { dir: dir.into() }.entries().into_iter().map(|e| e.0.strip_prefix(dir).unwrap().into()).collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn temp_names_are_unique_per_write() {
+        let p = Path::new("x").join("ab").join("abcd");
+        assert_ne!(tmp_path(&p), tmp_path(&p));
+        assert_eq!(tmp_path(&p).parent(), p.parent());
     }
 
     #[test]
