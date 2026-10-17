@@ -99,6 +99,8 @@ pub enum Busy {
     Restore(Job<Restored>),
     Add(Job<add::Done>),
     Resend(Job<String>),
+    /// Downloading the update; the staged exe when done.
+    Update(Job<std::path::PathBuf>),
 }
 
 pub struct Approved {
@@ -116,6 +118,7 @@ impl Busy {
             Busy::Restore(_) => "Restoring deleted files…",
             Busy::Add(_) => "Talking to the server (deriving keys takes a moment)…",
             Busy::Resend(_) => "Sending the join request…",
+            Busy::Update(_) => "Downloading and checking the update…",
         }
     }
 }
@@ -135,6 +138,8 @@ pub enum Pending {
     Restore { vault: String, since: u64 },
     Forget { vault: String },
     MoveChunks { vault: String, to: Option<PathBuf> },
+    /// Download and install the update that is available, then restart.
+    Update,
     Quit,
 }
 
@@ -295,6 +300,18 @@ impl<'a> Gui<'a> {
                     self.toast("Join request sent again; waiting for approval.");
                 }
             },
+            Busy::Update(mut j) => match j.poll() {
+                None => self.busy = Some(Busy::Update(j)),
+                Some(Err(e)) => self.fail("Downloading the update failed", &e),
+                Some(Ok(staged)) => match kybersync_client::update::install(&staged) {
+                    Err(e) => self.fail("Installing the update failed", &e),
+                    Ok(()) => {
+                        self.core.updates.restart = true;
+                        self.core.quit = true;
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                },
+            },
         }
         if self.busy.is_some() {
             ctx.request_repaint_after(Duration::from_millis(200));
@@ -333,6 +350,12 @@ impl<'a> Gui<'a> {
                 if let Some(i) = self.core.find(&vault) {
                     self.core.begin_chunk_move(i, to);
                 }
+            }
+            Pending::Update => {
+                let Some(u) = self.core.updates.available.clone() else { return };
+                self.busy = Some(Busy::Update(Job::spawn(self.core.rt.handle(), async move {
+                    kybersync_client::update::download(&u).await
+                })));
             }
             Pending::Quit => {
                 self.core.quit = true;
@@ -398,6 +421,15 @@ impl<'a> Gui<'a> {
                     ui.add_space(12.0);
                     ui.label(RichText::new(format!("version {}", crate::VERSION)).small().color(theme::TEXT_FAINT));
                 });
+                if let Some(u) = &self.core.updates.available {
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        let text = RichText::new(format!("Update to {} available", u.version)).small().color(theme::ACCENT);
+                        if ui.link(text).clicked() {
+                            next = Some(Nav::Settings);
+                        }
+                    });
+                }
                 if util::nav_item(ui, self.nav == Nav::Settings, None, "Settings").clicked() {
                     next = Some(Nav::Settings);
                 }
@@ -631,6 +663,11 @@ impl eframe::App for Gui<'_> {
                 }
                 None => {}
             }
+        }
+        if self.core.updates.show {
+            self.core.updates.show = false;
+            self.nav = Nav::Settings;
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
         if self.last_tick.elapsed() >= Duration::from_secs(1) {
             self.last_tick = Instant::now();

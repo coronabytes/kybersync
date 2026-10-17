@@ -9,6 +9,8 @@ pub mod keys;
 pub mod logs;
 pub mod progress;
 pub mod setup;
+pub mod update;
+pub mod zip;
 
 #[cfg(windows)]
 pub mod autostart;

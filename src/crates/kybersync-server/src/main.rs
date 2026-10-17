@@ -5,6 +5,7 @@ mod api;
 #[cfg(test)]
 mod api_tests;
 mod store;
+mod update;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
@@ -18,7 +19,7 @@ enum Backend {
 }
 
 #[derive(Parser, Debug)]
-#[command(version, about = "kybersync zero-knowledge sync server")]
+#[command(version = update::VERSION, about = "kybersync zero-knowledge sync server")]
 struct Args {
     /// Address to listen on.
     #[arg(long, env = "KYBERSYNC_LISTEN", default_value = "0.0.0.0:8443")]
@@ -81,6 +82,11 @@ struct Args {
     /// e.g. when a reverse proxy in front already enforces one.
     #[arg(long, env = "KYBERSYNC_RATE_LIMIT_PER_MINUTE", default_value_t = api::DEFAULT_RATE_LIMIT)]
     rate_limit_per_minute: u32,
+
+    /// Look for a newer release on GitHub at startup and then daily, and log
+    /// it. Only the server's name and version are sent (as the user agent).
+    #[arg(long, env = "KYBERSYNC_UPDATE_CHECK", default_value_t = true, action = clap::ArgAction::Set)]
+    update_check: bool,
 }
 
 /// `kybersync-server healthcheck` for container health probes (the distroless
@@ -169,7 +175,10 @@ async fn serve() -> Result<()> {
     // The rate limiter keys on the peer address, so the app needs connect info.
     let app = api::router(state).into_make_service_with_connect_info::<SocketAddr>();
 
-    tracing::info!(listen = %args.listen, storage = ?args.storage, "kybersync-server starting");
+    tracing::info!(version = update::VERSION, listen = %args.listen, storage = ?args.storage, "kybersync-server starting");
+    if args.update_check {
+        update::spawn(std::time::Duration::from_secs(24 * 3600));
+    }
     match (args.tls_cert, args.tls_key) {
         (Some(cert), Some(key)) => {
             let cfg = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)

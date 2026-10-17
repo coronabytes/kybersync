@@ -18,6 +18,10 @@ pub struct Config {
     /// Folder for `kybersync.log`; `None` means [`data_dir`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_dir: Option<PathBuf>,
+    /// Don't look for new releases on GitHub. Stored inverted so a missing
+    /// field (and a fresh config) means checking is on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_update_check: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

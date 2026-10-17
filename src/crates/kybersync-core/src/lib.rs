@@ -6,6 +6,8 @@
 //! * [`tree`]    – the deterministic, conflict-resolving file tree that every
 //!   client rebuilds by replaying the encrypted commit log (or a snapshot of
 //!   it plus the log tail, after compaction).
+//! * [`update`]  – GitHub release JSON and version comparison for the update
+//!   checks of client and server.
 //!
 //! Key epochs: [`crypto::KeyRing`] holds the vault key of every epoch a device
 //! can read; records carry their epoch in a cleartext header
@@ -18,6 +20,7 @@
 pub mod crypto;
 pub mod proto;
 pub mod tree;
+pub mod update;
 
 /// Size of a plaintext file chunk. Files are split into fixed-size chunks so
 /// random writes only re-encrypt the affected chunk.

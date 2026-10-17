@@ -17,6 +17,7 @@ kybersync-core = { path = "../kybersync-core" }
 futures = "0.3"
 hex.workspace = true
 object_store = { version = "0.14", features = ["aws"] }
+reqwest = { version = "0.13", features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
 subtle = "2"

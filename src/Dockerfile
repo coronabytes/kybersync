@@ -5,6 +5,9 @@ FROM rust:1-slim-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends cmake pkg-config && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
+# The release tag (e.g. v1.0.2) for the version the server reports and its
+# update check; the build context has no .git to read it from.
+ARG KYBERSYNC_VERSION=
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p kybersync-server \

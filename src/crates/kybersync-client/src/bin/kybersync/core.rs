@@ -4,6 +4,7 @@
 
 use crate::icon::Light;
 use crate::jobs::Job;
+use crate::updates::Updates;
 use anyhow::{Result, anyhow};
 use kybersync_client::config::{Config, Profile, remove_vault_folder, vault_dir};
 use kybersync_client::engine::{Engine, Status};
@@ -209,14 +210,23 @@ pub struct Core {
     pub vaults: Vec<Vault>,
     /// Set by the window when the user quits from there.
     pub quit: bool,
-    /// Vaults were added or removed; the tray menu needs rebuilding.
+    /// Vaults were added or removed, or an update was found; the tray menu
+    /// needs rebuilding.
     pub vaults_changed: bool,
+    pub updates: Updates,
 }
 
 impl Core {
     pub fn new(rt: Runtime) -> Result<Self> {
         let cfg = Config::load()?;
-        Ok(Core { rt, vaults: cfg.vaults.into_iter().map(Vault::new).collect(), quit: false, vaults_changed: false })
+        let updates = Updates::new(&cfg);
+        Ok(Core {
+            rt,
+            vaults: cfg.vaults.into_iter().map(Vault::new).collect(),
+            quit: false,
+            vaults_changed: false,
+            updates,
+        })
     }
 
     /// Mount what should be mounted and watch pending join requests.
@@ -294,6 +304,9 @@ impl Core {
         for i in 0..self.vaults.len() {
             self.poll_chunk_move(i);
             self.poll_wait(i);
+        }
+        if self.updates.tick(self.rt.handle()) {
+            self.vaults_changed = true;
         }
     }
 
