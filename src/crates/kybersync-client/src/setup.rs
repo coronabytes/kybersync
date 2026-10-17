@@ -126,9 +126,7 @@ pub async fn init(
     kit_path: &Path,
 ) -> Result<InitOutcome> {
     ensure_server_url(server)?;
-    if !kybersync_core::proto::valid_vault_id(vault) {
-        bail!("vault name must be 1-64 chars of a-z, 0-9, '-' or '_'");
-    }
+    crate::config::check_vault_id(vault)?;
     if kit_path.exists() {
         bail!("{} already exists; refusing to overwrite a recovery kit", kit_path.display());
     }
@@ -206,6 +204,7 @@ impl InviteFile {
             bail!("unknown invite format {}", inv.format);
         }
         ensure_server_url(&inv.server)?;
+        crate::config::check_vault_id(&inv.vault)?;
         if normalize_invite_code(&inv.code).is_none() {
             bail!("the invite holds a malformed code");
         }
@@ -245,6 +244,18 @@ mod invite_file_tests {
         let bad = r#"{"format":"kybersync-invite-v1","server":"https://s","vault":"v","code":"0OIL","expires":1}"#;
         assert!(InviteFile::parse(bad).is_err());
     }
+
+    #[test]
+    fn rejects_vault_names_that_are_paths() {
+        // The vault name becomes a local folder name; an invite must not be
+        // able to point it at an arbitrary directory.
+        for vault in ["C:\\", "..\\..", "../..", "a/b", "a\\b", "", "Vault", "x".repeat(65).as_str()] {
+            let json = serde_json::json!({
+                "format": INVITE_V1, "server": "https://s", "vault": vault, "code": "ABCDEFGH", "expires": 1
+            });
+            assert!(InviteFile::parse(&json.to_string()).is_err(), "accepted vault {vault:?}");
+        }
+    }
 }
 
 /// Register this device as pending, presenting an invite code from an existing
@@ -253,6 +264,7 @@ mod invite_file_tests {
 /// request is resumed; with one it is re-sent under the same device keys.
 pub async fn join_request(server: &str, vault: &str, device_name: &str, code: Option<&str>) -> Result<(Profile, String)> {
     ensure_server_url(server)?;
+    crate::config::check_vault_id(vault)?;
     let code = match code {
         Some(c) => Some(normalize_invite_code(c).context("invite codes look like ABCD-EFGH (letters and digits, no 0/O/1/I)")?),
         None => None,
@@ -341,6 +353,7 @@ pub fn read_kit(path: &Path) -> Result<RecoveryKit> {
     if kit.format != KIT_V1 && kit.format != KIT_V2 {
         bail!("unknown recovery kit format {}", kit.format);
     }
+    crate::config::check_vault_id(&kit.vault).context("recovery kit")?;
     Ok(kit)
 }
 
