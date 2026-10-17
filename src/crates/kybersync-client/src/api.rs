@@ -74,10 +74,16 @@ fn transport(e: reqwest::Error) -> ApiError {
 
 impl Api {
     pub fn new(server: &str, vault: &str, device_id: &str, secret: Option<Arc<DeviceSecret>>) -> Result<Self> {
+        // Checked here too, so profiles saved before the check existed can't
+        // send tokens in the clear.
+        let loopback = ensure_server_url(server)?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("kybersync/", env!("KYBERSYNC_VERSION")))
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(120))
+            .https_only(!loopback)
+            // No endpoint redirects; following one would carry the admin header elsewhere.
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
             http,
@@ -358,16 +364,43 @@ impl Api {
     }
 }
 
-pub fn ensure_server_url(s: &str) -> Result<()> {
-    let lower = s.to_ascii_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        bail!("server must be an http(s):// URL");
+/// Accept `https://` anywhere, and plain `http://` only for a loopback host.
+/// Returns whether the host is loopback.
+pub fn ensure_server_url(s: &str) -> Result<bool> {
+    let Ok(url) = reqwest::Url::parse(s) else { bail!("server must be an http(s):// URL") };
+    let Some(host) = url.host_str() else { bail!("server URL has no host") };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    match url.scheme() {
+        "https" => Ok(loopback),
+        "http" if loopback => Ok(true),
+        "http" => bail!(
+            "plain http:// is only allowed for localhost; use https:// so session tokens \
+             and metadata aren't sent in the clear"
+        ),
+        _ => bail!("server must be an http(s):// URL"),
     }
-    if lower.starts_with("http://") && !lower.contains("://localhost") && !lower.contains("://127.0.0.1") {
-        eprintln!(
-            "warning: using plain HTTP. File contents stay end-to-end encrypted, but use HTTPS \
-             (ideally with X25519MLKEM768) to protect metadata and session tokens."
-        );
+}
+
+#[cfg(test)]
+mod server_url_tests {
+    use super::ensure_server_url;
+
+    #[test]
+    fn https_anywhere_http_only_on_loopback() {
+        for ok in ["https://sync.example.com", "HTTPS://x", "http://localhost:8443", "http://127.0.0.1", "http://[::1]:80/"] {
+            assert!(ensure_server_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://sync.example.com",
+            "http://localhost.attacker.tld",
+            "http://127.0.0.1.attacker.tld",
+            "http://user@localhost.attacker.tld",
+            "ftp://localhost",
+            "localhost:8443",
+            "",
+        ] {
+            assert!(ensure_server_url(bad).is_err(), "{bad}");
+        }
     }
-    Ok(())
 }
