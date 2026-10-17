@@ -13,6 +13,8 @@ path = "src/bin/kybersync/main.rs"
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
+crc32fast = "1"
+flate2 = "1"
 kybersync-core = { path = "../kybersync-core" }
 egui = "0.37"
 eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
@@ -23,6 +25,7 @@ reqwest = { version = "0.13", features = ["json"] }
 rfd = "0.17"
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.11"
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

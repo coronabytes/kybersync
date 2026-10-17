@@ -11,6 +11,7 @@ mod gui;
 mod icon;
 mod jobs;
 mod tray;
+mod updates;
 mod wake;
 
 use anyhow::Result;
@@ -24,17 +25,20 @@ fn main() -> Result<()> {
     kybersync_client::init_logging(true);
     wake::init();
 
+    // Held until the process exits, or until an update restarts the app.
     #[cfg(windows)]
-    {
+    let instance = {
         use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
         use windows::Win32::System::Threading::CreateMutexW;
-        // Leaked on purpose: held until the process exits.
-        let _instance = unsafe { CreateMutexW(None, true, instance::APP_MUTEX)? };
+        let h = unsafe { CreateMutexW(None, true, instance::APP_MUTEX)? };
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             instance::signal_open();
             return Ok(());
         }
-    }
+        h
+    };
+    // The exe an update replaced may still be exiting; don't wait for it here.
+    std::thread::spawn(kybersync_client::update::clean_up);
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(8 << 20).build()?;
     let mut core = core::Core::new(rt)?;
@@ -68,6 +72,17 @@ fn main() -> Result<()> {
     }
 
     drop(tray);
+    let restart = core.updates.restart;
     core.shutdown();
+    if restart {
+        // The new process must not find our mutex, or it only signals us.
+        #[cfg(windows)]
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(instance);
+        }
+        if let Err(e) = kybersync_client::update::relaunch() {
+            tracing::error!("restarting after the update failed: {e:#}");
+        }
+    }
     Ok(())
 }

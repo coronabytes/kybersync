@@ -204,6 +204,17 @@ Run only one server instance per bucket.
 | `KYBERSYNC_GC_INTERVAL_HOURS`      | `24`           | how often unused chunks are cleaned up (0: never automatically) |
 | `KYBERSYNC_GC_GRACE_HOURS`         | `168`          | unused chunks younger than this are kept (min 1) |
 | `KYBERSYNC_SWEEP_INTERVAL_MINUTES` | `10`           | server housekeeping interval                         |
+| `KYBERSYNC_UPDATE_CHECK`           | `true`         | log at startup (and daily) when a newer release is on GitHub |
+
+### Updating the server
+
+The server logs its version at startup and checks GitHub for a newer release. When one exists,
+it logs a warning with the image tag to pull. To update, pull the new image and recreate the
+container:
+
+```bash
+docker compose pull && docker compose up -d
+```
 
 ## Set up the client
 
@@ -220,6 +231,12 @@ Run only one server instance per bucket.
 
 The vault's **Restore** tab brings back deleted files, and **Settings → Start with Windows** keeps
 the app running in the notification area.
+
+**Updates.** The app checks GitHub for a new release at startup and once a day. When one is
+out, the tray menu and the sidebar say so. **Settings → Updates → Install and restart** downloads
+the release zip, checks it against the SHA-256 that GitHub recorded, puts the new `kybersync.exe`
+in place of the running one and restarts. **Download zip** fetches the zip in the browser
+instead. Automatic checks can be turned off in the same section.
 
 ## License
 

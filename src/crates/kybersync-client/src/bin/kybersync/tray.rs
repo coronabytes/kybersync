@@ -38,6 +38,8 @@ pub struct Tray {
     /// Transfer progress over all vaults, at the top of the menu.
     up: MenuItem,
     down: MenuItem,
+    /// "Update to 1.2.3…", in the menu while an update is available.
+    update: MenuItem,
     quit: MenuItem,
     vaults: Vec<VaultItems>,
     last_light: Option<Light>,
@@ -70,6 +72,7 @@ impl Tray {
             open: MenuItem::new("Open kybersync", true, None),
             up: MenuItem::new("", false, None),
             down: MenuItem::new("", false, None),
+            update: MenuItem::new("", true, None),
             quit: MenuItem::new("Quit", true, None),
             vaults: Vec::new(),
             last_light: None,
@@ -118,6 +121,10 @@ impl Tray {
         }
         if core.vaults.is_empty() {
             let _ = menu.append(&MenuItem::new("No vault set up yet", false, None));
+        }
+        if let Some(u) = &core.updates.available {
+            self.update.set_text(format!("Update to kybersync {}…", u.version));
+            let _ = menu.append_items(&[&PredefinedMenuItem::separator(), &self.update]);
         }
         let _ = menu.append_items(&[&PredefinedMenuItem::separator(), &self.quit]);
         self.icon.set_menu(Some(Box::new(menu)));
@@ -170,6 +177,10 @@ impl Tray {
             return Some(Open::Quit);
         }
         if id == *self.open.id() {
+            return Some(Open::Window(None));
+        }
+        if id == *self.update.id() {
+            core.updates.show = true;
             return Some(Open::Window(None));
         }
         for items in &self.vaults {
