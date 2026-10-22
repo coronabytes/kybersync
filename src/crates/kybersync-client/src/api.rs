@@ -321,12 +321,12 @@ impl Api {
         self.send(|| self.req(Method::GET, "/maintenance")).await?.json().await.map_err(transport)
     }
 
-    /// Size of the server's storage; `None` when it can't tell (S3 backend)
-    /// or is too old to say.
-    pub async fn storage(&self) -> Result<Option<StorageSpace>, ApiError> {
+    /// Size of the server's storage, the vault's share of it and the server
+    /// version; empty from a server too old to say.
+    pub async fn storage(&self) -> Result<StorageInfo, ApiError> {
         match self.send(|| self.req(Method::GET, "/storage")).await {
-            Ok(r) => Ok(r.json::<StorageInfo>().await.map_err(transport)?.space),
-            Err(ApiError::NotFound) => Ok(None),
+            Ok(r) => r.json::<StorageInfo>().await.map_err(transport),
+            Err(ApiError::NotFound) => Ok(StorageInfo::default()),
             Err(e) => Err(e),
         }
     }

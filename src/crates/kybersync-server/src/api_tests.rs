@@ -981,7 +981,8 @@ async fn sweep_cleans_leftovers() {
     assert!(exists(&format!("devices/{}.json", a.public().unwrap().device_id())));
 }
 
-/// Devices see the `fs` backend's free space; without a data dir (S3) it's unknown.
+/// Devices see the `fs` backend's free space; without a data dir (S3) it's
+/// unknown. Either way they see the vault's size and the server version.
 #[tokio::test]
 async fn storage_space() {
     let dir = tempfile::tempdir().unwrap();
@@ -996,9 +997,12 @@ async fn storage_space() {
     let info: StorageInfo = json(call(&app, raw_req("GET", "/v1/vaults/v1/storage", &token, vec![])).await).await;
     let space = info.space.expect("fs backend reports space");
     assert!(space.total > 0 && space.free <= space.total);
+    assert!(info.used.is_some_and(|n| n > 0), "the vault's meta and keyslots count");
+    assert_eq!(info.version, crate::update::VERSION);
 
     let f = fixture();
     let token = create_v2(&f.app, &a, &rec_id, &VaultKey::generate()).await;
     let info: StorageInfo = json(call(&f.app, raw_req("GET", "/v1/vaults/v1/storage", &token, vec![])).await).await;
     assert_eq!(info.space, None);
+    assert!(info.used.is_some_and(|n| n > 0));
 }

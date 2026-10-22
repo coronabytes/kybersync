@@ -201,14 +201,31 @@ impl Gui<'_> {
                     open_path(&format!("{d}\\"));
                 }
             });
-            if let Some(p) = self.core.vaults[i].progress() {
+            if let (Some(p), Some(e)) = (self.core.vaults[i].progress(), self.core.vaults[i].engine.clone()) {
                 let paused = self.core.vaults[i].offline();
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
-                ui.columns(2, |cols| {
-                    util::transfer(&mut cols[0], util::Way::Up, &p.up, paused, false);
-                    util::transfer(&mut cols[1], util::Way::Down, &p.down, paused, p.on_demand);
+                util::throughput(ui, &e.throughput(), p.up.rate, p.down.rate);
+                // What is still queued, with its progress; nothing when all is synced.
+                if !p.idle() {
+                    ui.add_space(10.0);
+                    ui.columns(2, |cols| {
+                        util::transfer(&mut cols[0], util::Way::Up, &p.up, paused, false);
+                        util::transfer(&mut cols[1], util::Way::Down, &p.down, paused, p.on_demand);
+                    });
+                }
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                let info = e.server_info();
+                // Free space is only known for the `fs` backend.
+                ui.columns(if info.space.is_some() { 3 } else { 2 }, |cols| {
+                    util::stat(&mut cols[0], "Server version", if info.version.is_empty() { "—" } else { &info.version });
+                    util::stat(&mut cols[1], "Stored on the server", &info.used.map_or_else(|| "—".to_string(), util::size));
+                    if let Some(s) = info.space {
+                        util::stat(&mut cols[2], "Free on the server", &util::size(s.free));
+                    }
                 });
             }
         });

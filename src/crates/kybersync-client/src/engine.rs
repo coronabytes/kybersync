@@ -31,10 +31,10 @@
 use crate::api::{Api, ApiError};
 use crate::cache::ChunkCache;
 use crate::config::{Profile, vault_dir};
-use crate::progress::{Direction, Meter, SyncProgress};
+use crate::progress::{Direction, Meter, SyncProgress, Throughput};
 use anyhow::{Context, Result, anyhow};
 use kybersync_core::crypto::{self, ChunkId, KeyRing};
-use kybersync_core::proto::{GcRequest, MaintenanceTask, StorageSpace, decode_frames, encode_frames};
+use kybersync_core::proto::{GcRequest, MaintenanceTask, StorageInfo, StorageSpace, decode_frames, encode_frames};
 use kybersync_core::tree::{ChainState, Commit, Entry, GENESIS, Kind, NodeId, Op, ROOT, RestorePlan, Snapshot, Tree, now_unix};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -310,8 +310,9 @@ pub struct Engine {
     maintenance: watch::Sender<Option<MaintenanceReport>>,
     /// Seq covered by `snapshot.bin` (local log trimming).
     local_snapshot: AtomicU64,
-    /// Last known size of the server's storage.
-    server_space: Mutex<Option<StorageSpace>>,
+    /// Last known size of the server's storage, the vault's share and the
+    /// server version.
+    server_info: Mutex<StorageInfo>,
     stop: watch::Sender<bool>,
     rt: Handle,
 }
@@ -371,7 +372,7 @@ impl Engine {
             maintaining: tokio::sync::Mutex::new(()),
             maintenance: watch::channel(None).0,
             local_snapshot: AtomicU64::new(local_snapshot),
-            server_space: Mutex::new(None),
+            server_info: Mutex::default(),
             stop: watch::channel(false).0,
             rt: rt.clone(),
         });
@@ -454,15 +455,27 @@ impl Engine {
 
     /// Size of the server's storage, if it reports one (`fs` backend).
     pub fn server_space(&self) -> Option<StorageSpace> {
-        *self.server_space.lock().unwrap()
+        self.server_info.lock().unwrap().space
     }
 
-    /// Keep [`Engine::server_space`] fresh; on errors the last value stays.
+    /// What the server last said about its storage and version.
+    pub fn server_info(&self) -> StorageInfo {
+        self.server_info.lock().unwrap().clone()
+    }
+
+    /// Bytes moved each way over the last few minutes, for a graph.
+    pub fn throughput(&self) -> Throughput {
+        let now = std::time::Instant::now();
+        let mut t = self.transfers.lock().unwrap();
+        Throughput { up: t.up.history_at(now), down: t.down.history_at(now) }
+    }
+
+    /// Keep [`Engine::server_info`] fresh; on errors the last value stays.
     async fn space_loop(self: Arc<Self>) {
         let mut stop = self.stop.subscribe();
         while !self.stopped() {
-            if let Ok(space) = self.api.storage().await {
-                *self.server_space.lock().unwrap() = space;
+            if let Ok(info) = self.api.storage().await {
+                *self.server_info.lock().unwrap() = info;
             }
             sleep_or_stop(&mut stop, SPACE_CHECK.as_secs()).await;
         }

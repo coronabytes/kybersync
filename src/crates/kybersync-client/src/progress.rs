@@ -6,13 +6,23 @@ use std::time::{Duration, Instant};
 
 /// How far back the transfer rate looks.
 const WINDOW: Duration = Duration::from_secs(10);
+/// How far back the throughput history goes.
+pub const HISTORY: Duration = Duration::from_secs(300);
+/// The width of one step of the history.
+pub const STEP: Duration = Duration::from_secs(5);
+const STEPS: usize = (HISTORY.as_secs() / STEP.as_secs()) as usize;
 
 /// Bytes moved recently, for a transfer rate, plus what moved since the
-/// current batch began (for a progress bar).
+/// current batch began (for a progress bar) and over the last minutes (for a
+/// graph).
 #[derive(Debug, Default)]
 pub struct Meter {
     samples: VecDeque<(Instant, u64)>,
     batch_done: u64,
+    /// Where step 0 of the history begins.
+    origin: Option<Instant>,
+    /// Bytes moved per step, by step number, oldest first.
+    history: VecDeque<(u64, u64)>,
 }
 
 impl Meter {
@@ -24,6 +34,33 @@ impl Meter {
         self.samples.push_back((now, bytes));
         self.batch_done += bytes;
         self.prune(now);
+        let step = self.step(now);
+        match self.history.back_mut() {
+            Some((s, b)) if *s == step => *b += bytes,
+            _ => self.history.push_back((step, bytes)),
+        }
+        while self.history.front().is_some_and(|(s, _)| *s + (STEPS as u64) < step) {
+            self.history.pop_front();
+        }
+    }
+
+    fn step(&mut self, now: Instant) -> u64 {
+        let origin = *self.origin.get_or_insert(now);
+        now.saturating_duration_since(origin).as_secs() / STEP.as_secs()
+    }
+
+    /// Bytes per second in each step of the last [`HISTORY`], oldest first.
+    /// The step under way is left out, so the last value is a whole one.
+    pub fn history_at(&mut self, now: Instant) -> Vec<f64> {
+        let current = self.step(now);
+        let first = current.saturating_sub(STEPS as u64);
+        let mut out = vec![0.0; STEPS];
+        for (s, b) in &self.history {
+            if (first..current).contains(s) {
+                out[(STEPS as u64 - (current - s)) as usize] = *b as f64 / STEP.as_secs_f64();
+            }
+        }
+        out
     }
 
     fn prune(&mut self, now: Instant) {
@@ -134,6 +171,14 @@ impl Direction {
             _ => what,
         }
     }
+}
+
+/// Transfer rates over the last [`HISTORY`], one value per [`STEP`] in bytes
+/// per second, oldest first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Throughput {
+    pub up: Vec<f64>,
+    pub down: Vec<f64>,
 }
 
 /// Sync work of one vault, both ways.
@@ -247,6 +292,29 @@ mod tests {
         assert!(m.active_at(t0 + Duration::from_secs(4)));
         assert_eq!(m.rate_at(t0 + Duration::from_secs(30)), None);
         assert!(!m.active_at(t0 + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn history_keeps_whole_steps_of_the_last_minutes() {
+        let t0 = Instant::now();
+        let s = STEP.as_secs();
+        let mut m = Meter::default();
+        assert_eq!(m.history_at(t0), vec![0.0; STEPS]);
+        m.record_at(t0, 5 * MB);
+        m.record_at(t0 + Duration::from_secs(1), 5 * MB);
+        let h = m.history_at(t0 + Duration::from_secs(s - 1));
+        assert!(h.iter().all(|r| *r == 0.0), "the step under way is left out");
+        let h = m.history_at(t0 + Duration::from_secs(s));
+        assert_eq!(h.len(), STEPS);
+        assert_eq!(h[STEPS - 1], (10 * MB / s) as f64);
+        let h = m.history_at(t0 + Duration::from_secs(3 * s));
+        assert_eq!(h[STEPS - 3], (10 * MB / s) as f64);
+        assert_eq!(h[STEPS - 1], 0.0);
+        let h = m.history_at(t0 + HISTORY);
+        assert_eq!(h[0], (10 * MB / s) as f64, "the oldest step still shows");
+        assert!(m.history_at(t0 + HISTORY + STEP).iter().all(|r| *r == 0.0));
+        m.record_at(t0 + HISTORY * 2, MB);
+        assert_eq!(m.history.len(), 1, "old steps are dropped");
     }
 
     #[test]

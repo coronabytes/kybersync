@@ -230,6 +230,12 @@ impl Store {
             .collect())
     }
 
+    /// Total size of everything stored for the vault.
+    pub async fn vault_size(&self, vault: &str) -> Result<u64> {
+        let prefix = Path::from(format!("vaults/{vault}"));
+        self.inner.list(Some(&prefix)).try_fold(0u64, |sum, m| async move { Ok(sum + m.size) }).await.map_err(Into::into)
+    }
+
     /// Upload time (unix seconds) of an object, if it exists.
     pub async fn modified(&self, path: &Path) -> Result<Option<u64>> {
         match self.inner.head(path).await {

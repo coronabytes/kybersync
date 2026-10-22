@@ -357,10 +357,18 @@ pub struct StorageSpace {
     pub free: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StorageInfo {
     /// Known for the `fs` backend; `None` for S3 and the like.
     pub space: Option<StorageSpace>,
+    /// Bytes the vault takes up on the server (chunks, log, snapshots and
+    /// the rest); recounted every few minutes. `None` when the count failed
+    /// or the server is too old to say.
+    #[serde(default)]
+    pub used: Option<u64>,
+    /// The server's version; empty from servers too old to say.
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

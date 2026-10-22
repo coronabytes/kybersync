@@ -22,6 +22,9 @@ pub const TEXT_WEAK: Color32 = Color32::from_rgb(139, 148, 158);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(96, 105, 116);
 /// The accent, used for the selection, primary buttons and the active tab.
 pub const ACCENT: Color32 = Color32::from_rgb(88, 142, 255);
+/// The two directions in the throughput graph.
+pub const UPLOAD: Color32 = ACCENT;
+pub const DOWNLOAD: Color32 = Color32::from_rgb(163, 113, 247);
 pub const DANGER: Color32 = Color32::from_rgb(226, 75, 74);
 pub const WARN: Color32 = Color32::from_rgb(227, 160, 8);
 

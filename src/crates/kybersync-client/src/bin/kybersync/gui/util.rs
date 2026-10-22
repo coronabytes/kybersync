@@ -3,7 +3,7 @@
 use super::theme;
 use crate::icon::Light;
 use egui::{Color32, CornerRadius, Response, RichText, Sense, Stroke, Ui, Vec2};
-use kybersync_client::progress::{self, Direction};
+use kybersync_client::progress::{self, Direction, Throughput};
 use std::path::PathBuf;
 
 pub const FIELD_WIDTH: f32 = 380.0;
@@ -93,6 +93,91 @@ pub fn transfer(ui: &mut Ui, way: Way, d: &Direction, paused: bool, on_demand: b
             };
             hint(ui, &when);
         });
+    });
+}
+
+/// Upload and download rates over the last minutes as two filled lines,
+/// with the current rates above and the time on hover.
+pub fn throughput(ui: &mut Ui, t: &Throughput, up_now: Option<f64>, down_now: Option<f64>) {
+    ui.horizontal(|ui| {
+        for (name, color, now) in [("Upload", theme::UPLOAD, up_now), ("Download", theme::DOWNLOAD, down_now)] {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.0, color);
+            ui.label(RichText::new(name).small().strong().color(theme::TEXT_WEAK));
+            ui.label(RichText::new(now.map_or("idle".to_string(), progress::rate)).color(theme::TEXT));
+            ui.add_space(10.0);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            hint(ui, &format!("last {} min", progress::HISTORY.as_secs() / 60));
+        });
+    });
+
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 96.0), Sense::hover());
+    let p = ui.painter_at(rect.expand(2.0));
+    let n = t.up.len().max(t.down.len());
+    let peak = t.up.iter().chain(&t.down).copied().fold(0.0, f64::max);
+    let top = nice_ceiling(peak);
+    for f in [0.0, 0.5, 1.0] {
+        let y = rect.bottom() - f * rect.height();
+        p.hline(rect.x_range(), y, Stroke::new(1.0, if f == 0.0 { theme::BORDER_STRONG } else { theme::BORDER }));
+    }
+    p.text(rect.left_top() + Vec2::new(2.0, 2.0), egui::Align2::LEFT_TOP, progress::rate(top), egui::FontId::proportional(11.0), theme::TEXT_FAINT);
+    if n < 2 {
+        return;
+    }
+    let x = |i: usize| rect.left() + rect.width() * i as f32 / (n - 1) as f32;
+    let y = |v: f64| rect.bottom() - rect.height() * (v / top).clamp(0.0, 1.0) as f32;
+    for (values, color) in [(&t.down, theme::DOWNLOAD), (&t.up, theme::UPLOAD)] {
+        if values.iter().all(|v| *v == 0.0) {
+            continue;
+        }
+        let line: Vec<egui::Pos2> = values.iter().enumerate().map(|(i, v)| egui::pos2(x(i), y(*v))).collect();
+        let mut area = egui::Mesh::default();
+        let fill = theme::tint(color, 40);
+        for (i, pt) in line.iter().enumerate() {
+            area.colored_vertex(*pt, fill);
+            area.colored_vertex(egui::pos2(pt.x, rect.bottom()), theme::tint(color, 4));
+            if i > 0 {
+                let k = 2 * i as u32;
+                area.add_triangle(k - 2, k - 1, k);
+                area.add_triangle(k - 1, k + 1, k);
+            }
+        }
+        p.add(egui::Shape::mesh(area));
+        p.line(line, Stroke::new(1.5, color));
+    }
+
+    if let Some(pos) = resp.hover_pos() {
+        let i = (((pos.x - rect.left()) / rect.width() * (n - 1) as f32).round() as usize).min(n - 1);
+        p.vline(x(i), rect.y_range(), Stroke::new(1.0, theme::TEXT_FAINT));
+        let ago = match (n - i) as u64 * progress::STEP.as_secs() {
+            s @ 0..60 => format!("{s} s ago"),
+            s => format!("{} min {} s ago", s / 60, s % 60),
+        };
+        let at = |v: &[f64]| v.get(i).copied().unwrap_or(0.0);
+        resp.on_hover_ui_at_pointer(|ui| {
+            hint(ui, &ago);
+            ui.label(format!("Upload {}", progress::rate(at(&t.up))));
+            ui.label(format!("Download {}", progress::rate(at(&t.down))));
+        });
+    }
+}
+
+/// The top of the graph's scale: 1, 2 or 5 times a power of ten in KB/s,
+/// at least 100 KB/s so a quiet graph stays flat.
+fn nice_ceiling(bytes_per_sec: f64) -> f64 {
+    let kb = (bytes_per_sec / 1024.0).max(100.0);
+    let pow = 10f64.powf(kb.log10().floor());
+    let m = [1.0, 2.0, 5.0, 10.0].into_iter().find(|m| m * pow >= kb).unwrap_or(10.0);
+    m * pow * 1024.0
+}
+
+/// A small title over a value, as in the transfer rows.
+pub fn stat(ui: &mut Ui, title: &str, value: &str) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(RichText::new(title).small().strong().color(theme::TEXT_WEAK));
+        ui.label(RichText::new(value).size(15.0));
     });
 }
 

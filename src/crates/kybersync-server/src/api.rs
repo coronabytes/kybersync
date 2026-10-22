@@ -41,6 +41,9 @@ const MAX_LOG_RESPONSE: usize = 32 * 1024 * 1024;
 /// asks: covers the window between a client uploading chunks and appending
 /// the commit that references them.
 const MIN_GC_GRACE: Duration = Duration::from_secs(3600);
+/// How long a vault's counted size is reused before it is counted again
+/// (counting lists every object of the vault).
+const USAGE_TTL: Duration = Duration::from_secs(300);
 
 /// When devices are asked to compact the log and garbage-collect blobs.
 #[derive(Clone, Debug)]
@@ -98,6 +101,8 @@ struct Vault {
     log_start: AtomicU64,
     created: u64,
     maint: Mutex<MaintState>,
+    /// The vault's size on the server and when it was counted.
+    usage: Mutex<Option<(Instant, u64)>>,
 }
 
 struct MaintState {
@@ -210,6 +215,7 @@ impl AppState {
             append: Mutex::new(()),
             head: watch::channel(head).0,
             log_start: AtomicU64::new(log_start),
+            usage: Mutex::new(None),
         });
         vaults.insert(id.to_string(), v.clone());
         Ok(v)
@@ -290,9 +296,31 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// How much room the server's storage has, so a mounted drive can show it.
-async fn storage_info(State(st): State<Arc<AppState>>, _auth: Authed) -> ApiResult<Json<StorageInfo>> {
-    Ok(Json(StorageInfo { space: st.data_dir.as_deref().and_then(disk_space) }))
+/// How much room the server's storage has, so a mounted drive can show it,
+/// how much of it the vault takes up, and the server's version.
+async fn storage_info(State(st): State<Arc<AppState>>, auth: Authed) -> ApiResult<Json<StorageInfo>> {
+    let used = {
+        // Held while counting, so devices asking at once share one count.
+        let mut usage = auth.vault.usage.lock().await;
+        match *usage {
+            Some((at, n)) if at.elapsed() < USAGE_TTL => Some(n),
+            _ => match st.store.vault_size(&auth.vault_id).await {
+                Ok(n) => {
+                    *usage = Some((Instant::now(), n));
+                    Some(n)
+                }
+                Err(e) => {
+                    tracing::warn!(vault = auth.vault_id, "counting the vault's size: {e:#}");
+                    usage.map(|(_, n)| n)
+                }
+            },
+        }
+    };
+    Ok(Json(StorageInfo {
+        space: st.data_dir.as_deref().and_then(disk_space),
+        used,
+        version: crate::update::VERSION.to_string(),
+    }))
 }
 
 #[cfg(unix)]
