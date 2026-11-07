@@ -313,6 +313,9 @@ pub struct Engine {
     /// Last known size of the server's storage, the vault's share and the
     /// server version.
     server_info: Mutex<StorageInfo>,
+    /// [`Tree::encrypted_size`] of the current view, refreshed with
+    /// `server_info`.
+    encrypted_size: AtomicU64,
     stop: watch::Sender<bool>,
     rt: Handle,
 }
@@ -373,6 +376,7 @@ impl Engine {
             maintenance: watch::channel(None).0,
             local_snapshot: AtomicU64::new(local_snapshot),
             server_info: Mutex::default(),
+            encrypted_size: AtomicU64::new(0),
             stop: watch::channel(false).0,
             rt: rt.clone(),
         });
@@ -463,6 +467,13 @@ impl Engine {
         self.server_info.lock().unwrap().clone()
     }
 
+    /// What the vault's files take up encrypted (each chunk once), worked
+    /// out locally; refreshed every minute. Shown when the server doesn't
+    /// count its usage (S3).
+    pub fn encrypted_size(&self) -> u64 {
+        self.encrypted_size.load(Ordering::Relaxed)
+    }
+
     /// Bytes moved each way over the last few minutes, for a graph.
     pub fn throughput(&self) -> Throughput {
         let now = std::time::Instant::now();
@@ -474,6 +485,8 @@ impl Engine {
     async fn space_loop(self: Arc<Self>) {
         let mut stop = self.stop.subscribe();
         while !self.stopped() {
+            let size = self.state.read().unwrap().view.encrypted_size();
+            self.encrypted_size.store(size, Ordering::Relaxed);
             if let Ok(info) = self.api.storage().await {
                 *self.server_info.lock().unwrap() = info;
             }

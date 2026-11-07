@@ -220,14 +220,24 @@ impl Gui<'_> {
                 ui.separator();
                 ui.add_space(6.0);
                 let info = e.server_info();
-                // Free space is only known for the `fs` backend.
-                ui.columns(if info.space.is_some() { 3 } else { 2 }, |cols| {
-                    util::stat(&mut cols[0], "Server version", if info.version.is_empty() { "—" } else { &info.version });
-                    util::stat(&mut cols[1], "Stored on the server", &info.used.map_or_else(|| "—".to_string(), util::size));
-                    if let Some(s) = info.space {
-                        util::stat(&mut cols[2], "Free on the server", &util::size(s.free));
-                    }
-                });
+                let version = if info.version.is_empty() { "—" } else { &info.version };
+                if info.backend == "s3" {
+                    // The server doesn't count an S3 bucket; size up the files here.
+                    ui.columns(3, |cols| {
+                        util::stat(&mut cols[0], "Server version", version);
+                        util::stat(&mut cols[1], "Server storage", "S3");
+                        util::stat(&mut cols[2], "Your files, encrypted", &util::size(e.encrypted_size()));
+                    });
+                } else {
+                    // Free space is only known for the `fs` backend.
+                    ui.columns(if info.space.is_some() { 3 } else { 2 }, |cols| {
+                        util::stat(&mut cols[0], "Server version", version);
+                        util::stat(&mut cols[1], "Stored on the server", &info.used.map_or_else(|| "—".to_string(), util::size));
+                        if let Some(s) = info.space {
+                            util::stat(&mut cols[2], "Free on the server", &util::size(s.free));
+                        }
+                    });
+                }
             }
         });
     }

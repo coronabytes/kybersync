@@ -1,6 +1,6 @@
 //! API-level tests: authentication, authorization and storage semantics.
 
-use crate::api::{AppState, router};
+use crate::api::{AppState, StorageBackend, router};
 use crate::store::Store;
 use axum::Router;
 use axum::body::Body;
@@ -981,8 +981,9 @@ async fn sweep_cleans_leftovers() {
     assert!(exists(&format!("devices/{}.json", a.public().unwrap().device_id())));
 }
 
-/// Devices see the `fs` backend's free space; without a data dir (S3) it's
-/// unknown. Either way they see the vault's size and the server version.
+/// Devices see the `fs` backend's free space; without a data dir it's
+/// unknown. They see the vault's size and the server version, except that on
+/// S3 the vault isn't counted (that lists the bucket), only named.
 #[tokio::test]
 async fn storage_space() {
     let dir = tempfile::tempdir().unwrap();
@@ -999,10 +1000,20 @@ async fn storage_space() {
     assert!(space.total > 0 && space.free <= space.total);
     assert!(info.used.is_some_and(|n| n > 0), "the vault's meta and keyslots count");
     assert_eq!(info.version, crate::update::VERSION);
+    assert_eq!(info.backend, "fs");
 
     let f = fixture();
     let token = create_v2(&f.app, &a, &rec_id, &VaultKey::generate()).await;
     let info: StorageInfo = json(call(&f.app, raw_req("GET", "/v1/vaults/v1/storage", &token, vec![])).await).await;
     assert_eq!(info.space, None);
     assert!(info.used.is_some_and(|n| n > 0));
+
+    let dir = tempfile::tempdir().unwrap();
+    let fs = object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+    let state = AppState::new(Store::new(Arc::new(fs)), "admin".into()).with_backend(StorageBackend::S3);
+    let app = router(Arc::new(state));
+    let token = create_v2(&app, &a, &rec_id, &VaultKey::generate()).await;
+    let info: StorageInfo = json(call(&app, raw_req("GET", "/v1/vaults/v1/storage", &token, vec![])).await).await;
+    assert_eq!((info.space, info.used, info.backend.as_str()), (None, None, "s3"));
+    assert_eq!(info.version, crate::update::VERSION);
 }

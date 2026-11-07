@@ -167,9 +167,10 @@ async fn serve() -> Result<()> {
     let mut state = api::AppState::new(store::Store::new(backend), admin_token)
         .with_policy(policy)
         .with_rate_limit(args.rate_limit_per_minute);
-    if let Backend::Fs = args.storage {
-        state = state.with_data_dir(args.data_dir.clone());
-    }
+    state = match args.storage {
+        Backend::Fs => state.with_data_dir(args.data_dir.clone()),
+        Backend::S3 => state.with_backend(api::StorageBackend::S3),
+    };
     let state = Arc::new(state);
     api::spawn_sweeper(state.clone(), std::time::Duration::from_secs(args.sweep_interval_minutes.max(1) * 60));
     // The rate limiter keys on the peer address, so the app needs connect info.
