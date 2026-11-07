@@ -476,6 +476,24 @@ impl Tree {
         self.nodes.values().filter(|n| n.entry.kind == Kind::File).flat_map(|n| n.entry.chunks.iter().copied()).collect()
     }
 
+    /// Bytes the live files' chunks take up encrypted, each chunk counted
+    /// once (identical chunks are stored once): what the files need on the
+    /// server, before trash, history and snapshots.
+    pub fn encrypted_size(&self) -> u64 {
+        let chunk = crate::CHUNK_SIZE as u64;
+        let mut seen = HashSet::new();
+        let mut bytes = 0u64;
+        for e in self.nodes.values().map(|n| &n.entry).filter(|e| e.kind == Kind::File) {
+            for (i, id) in e.chunks.iter().enumerate() {
+                if seen.insert(*id) {
+                    let len = e.size.saturating_sub(i as u64 * chunk).min(chunk);
+                    bytes += len + crypto::CHUNK_OVERHEAD;
+                }
+            }
+        }
+        bytes
+    }
+
     // ----- trash ----------------------------------------------------------
     //
     // Deleted nodes stay as tombstones (with their chunk lists) and carry the
@@ -982,6 +1000,21 @@ mod tests {
 
     fn put(e: Entry, base: u64) -> Op {
         Op::Put { entry: e, base }
+    }
+
+    /// Each chunk counts once, at its own length plus the AEAD overhead;
+    /// folders and deleted files don't count.
+    #[test]
+    fn encrypted_size_counts_unique_chunks() {
+        let mb = crate::CHUNK_SIZE as u64;
+        let big = Entry { size: mb + 10, chunks: vec![ChunkId([7; 32]), ChunkId([8; 32])], ..file(1, ROOT, "big.bin", 0) };
+        let copy = Entry { id: 2, name: "copy.bin".into(), ..big.clone() };
+        let mut t = Tree::new();
+        t.apply_commit(1, &commit("a", vec![put(big, 0), put(copy, 0), put(dir(3, ROOT, "d"), 0), put(file(4, 3, "x", 9), 0)]));
+        let o = crypto::CHUNK_OVERHEAD;
+        assert_eq!(t.encrypted_size(), (mb + o) + (10 + o) + (1 + o));
+        t.apply_commit(2, &commit("a", vec![Op::Delete { id: 4, base: 1 }]));
+        assert_eq!(t.encrypted_size(), (mb + o) + (10 + o));
     }
 
     #[test]

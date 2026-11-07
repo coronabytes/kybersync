@@ -197,6 +197,10 @@ pub fn chunk_id(keys: &VaultKeys, plaintext: &[u8]) -> ChunkId {
     ChunkId(*blake3::keyed_hash(&keys.chunk_id, plaintext).as_bytes())
 }
 
+/// Bytes an encrypted chunk adds to its plaintext: the epoch envelope
+/// (`[2][epoch: u32]`), the seal version, the nonce and the Poly1305 tag.
+pub const CHUNK_OVERHEAD: u64 = 1 + 4 + 1 + NONCE_LEN as u64 + 16;
+
 /// Encrypts a chunk under the ring's current epoch. Returns `(id, blob)`.
 pub fn encrypt_chunk(ring: &KeyRing, plaintext: &[u8]) -> (ChunkId, Vec<u8>) {
     let id = chunk_id(ring.current(), plaintext);
@@ -659,6 +663,7 @@ mod tests {
     fn chunk_roundtrip() {
         let ring = KeyRing::new(0, VaultKey::generate());
         let (id, blob) = encrypt_chunk(&ring, b"chunk data");
+        assert_eq!(blob.len() as u64, b"chunk data".len() as u64 + CHUNK_OVERHEAD);
         assert_eq!(record_epoch(&blob), Some(0));
         assert_eq!(decrypt_chunk(&ring, &id, &blob).unwrap(), b"chunk data");
         let (other, _) = encrypt_chunk(&ring, b"different");

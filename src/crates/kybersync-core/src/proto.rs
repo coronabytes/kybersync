@@ -362,10 +362,15 @@ pub struct StorageInfo {
     /// Known for the `fs` backend; `None` for S3 and the like.
     pub space: Option<StorageSpace>,
     /// Bytes the vault takes up on the server (chunks, log, snapshots and
-    /// the rest); recounted every few minutes. `None` when the count failed
-    /// or the server is too old to say.
+    /// the rest); recounted every few minutes. `None` for S3 (counting means
+    /// listing every object in the bucket, so the server doesn't), when the
+    /// count failed, or when the server is too old to say.
     #[serde(default)]
     pub used: Option<u64>,
+    /// Where the server keeps its data: `fs` or `s3`; empty from servers too
+    /// old to say.
+    #[serde(default)]
+    pub backend: String,
     /// The server's version; empty from servers too old to say.
     #[serde(default)]
     pub version: String,

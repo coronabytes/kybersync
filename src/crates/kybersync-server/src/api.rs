@@ -75,6 +75,25 @@ impl Default for MaintenancePolicy {
     }
 }
 
+/// Where the server keeps its data, as reported to devices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StorageBackend {
+    #[default]
+    Fs,
+    /// Usage isn't counted: that would list every object in the bucket
+    /// (slow, and billed per request).
+    S3,
+}
+
+impl StorageBackend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Fs => "fs",
+            Self::S3 => "s3",
+        }
+    }
+}
+
 pub struct AppState {
     pub store: Store,
     pub admin_token: String,
@@ -84,6 +103,7 @@ pub struct AppState {
     limiter: RateLimiter,
     /// Root of the `fs` backend, for reporting free space.
     data_dir: Option<std::path::PathBuf>,
+    backend: StorageBackend,
     vaults: Mutex<HashMap<String, Arc<Vault>>>,
     sessions: Mutex<HashMap<[u8; 32], Session>>,
     challenges: Mutex<HashMap<(String, String), Challenge>>,
@@ -154,6 +174,7 @@ impl AppState {
             invite_ttl: INVITE_TTL,
             limiter: RateLimiter::new(DEFAULT_RATE_LIMIT),
             data_dir: None,
+            backend: StorageBackend::Fs,
             vaults: Mutex::default(),
             sessions: Mutex::default(),
             challenges: Mutex::default(),
@@ -168,6 +189,11 @@ impl AppState {
     /// Report the free space of `dir` (the `fs` backend's root) to devices.
     pub fn with_data_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.data_dir = Some(dir);
+        self
+    }
+
+    pub fn with_backend(mut self, backend: StorageBackend) -> Self {
+        self.backend = backend;
         self
     }
 
@@ -297,9 +323,12 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 /// How much room the server's storage has, so a mounted drive can show it,
-/// how much of it the vault takes up, and the server's version.
+/// how much of it the vault takes up, and the server's version. On S3 only
+/// the backend's name: devices work out their files' size themselves.
 async fn storage_info(State(st): State<Arc<AppState>>, auth: Authed) -> ApiResult<Json<StorageInfo>> {
-    let used = {
+    let used = if st.backend == StorageBackend::S3 {
+        None
+    } else {
         // Held while counting, so devices asking at once share one count.
         let mut usage = auth.vault.usage.lock().await;
         match *usage {
@@ -319,6 +348,7 @@ async fn storage_info(State(st): State<Arc<AppState>>, auth: Authed) -> ApiResul
     Ok(Json(StorageInfo {
         space: st.data_dir.as_deref().and_then(disk_space),
         used,
+        backend: st.backend.name().to_string(),
         version: crate::update::VERSION.to_string(),
     }))
 }
