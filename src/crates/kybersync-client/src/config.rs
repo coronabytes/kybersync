@@ -3,12 +3,17 @@
 //!
 //! The device secret and the wrapped vault key are stored DPAPI-protected, so
 //! they're bound to the Windows user account and the vault mounts at login
-//! without a password prompt.
+//! without a password prompt. A vault can also ask for a password: then the
+//! device secret is sealed under an Argon2id key from that password inside
+//! the DPAPI blob, and it is only held in memory while the vault is unlocked
+//! (see [`Profile::unlock`]).
 
 use anyhow::{Context, Result, bail};
 use kybersync_core::crypto::{self, ChainLink, DeviceSecret, KeyRing, VaultKey, WrappedKey};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -50,8 +55,12 @@ pub struct Profile {
     /// server says it is due (one device at a time, coordinated by the server).
     #[serde(default = "yes")]
     pub auto_maintenance: bool,
-    /// DPAPI-protected `DeviceSecret` JSON (base64).
+    /// DPAPI-protected `DeviceSecret` JSON (base64). With `password`, the
+    /// DPAPI blob holds a [`crypto::PasswordSlot`] sealing that JSON instead.
     pub device_secret: String,
+    /// Mounting asks for a password in addition to the Windows account.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub password: bool,
     /// The vault key wrapped to this device (hybrid ML-KEM/X25519), base64 JSON.
     /// Empty while a join request is pending.
     #[serde(default)]
@@ -197,7 +206,8 @@ impl Profile {
             cache_limit_mb: default_cache_mb(),
             chunk_dir: None,
             auto_maintenance: true,
-            device_secret: crypto::b64::encode(&dpapi::protect(&serde_json::to_vec(secret)?)?),
+            device_secret: seal_secret(secret, None)?,
+            password: false,
             keyslot: String::new(),
             epoch: 0,
         })
@@ -211,10 +221,75 @@ impl Profile {
         }
     }
 
+    /// The device secret: straight from DPAPI, or for a password-protected
+    /// vault the copy held since [`Profile::unlock`].
     pub fn secret(&self) -> Result<DeviceSecret> {
+        if self.password {
+            return match unlocked().get(&self.vault) {
+                Some(s) => Ok((**s).clone()),
+                None => bail!("the vault '{}' is locked; mount it with its password first", self.vault),
+            };
+        }
+        self.open_secret(None)
+    }
+
+    /// Decrypt the stored device secret, with `password` for a
+    /// password-protected vault, and check it belongs to this profile.
+    fn open_secret(&self, password: Option<&str>) -> Result<DeviceSecret> {
         let blob = crypto::b64::decode(&self.device_secret)?;
-        let json = Zeroizing::new(dpapi::unprotect(&blob).context("DPAPI: cannot unprotect device secret (different Windows user?)")?);
-        Ok(serde_json::from_slice(&json)?)
+        let mut json = Zeroizing::new(dpapi::unprotect(&blob).context("DPAPI: cannot unprotect device secret (different Windows user?)")?);
+        if self.password {
+            let Some(pw) = password else { bail!("the vault '{}' needs its password", self.vault) };
+            let slot: crypto::PasswordSlot = serde_json::from_slice(&json).context("malformed password slot")?;
+            json = crypto::unwrap_with_password(pw, &slot).map_err(|_| anyhow::anyhow!("wrong password"))?;
+        }
+        let secret: DeviceSecret = serde_json::from_slice(&json)?;
+        if secret.public()?.device_id() != self.device_id {
+            bail!("the stored device secret does not belong to this device");
+        }
+        Ok(secret)
+    }
+
+    /// Whether mounting needs the password first.
+    pub fn locked(&self) -> bool {
+        self.password && !unlocked().contains_key(&self.vault)
+    }
+
+    /// Check the password and keep the device secret in memory until
+    /// [`Profile::lock`]. Takes a moment (Argon2id); run it off the UI thread.
+    pub fn unlock(&self, password: &str) -> Result<()> {
+        if !self.password {
+            return Ok(());
+        }
+        let secret = self.open_secret(Some(password))?;
+        unlocked().insert(self.vault.clone(), Arc::new(secret));
+        Ok(())
+    }
+
+    /// Forget the unlocked device secret (on unmount).
+    pub fn lock(&self) {
+        unlocked().remove(&self.vault);
+    }
+
+    /// Turn the password on (`new: Some`), change it or turn it off
+    /// (`new: None`). `current` must be the present password, if there is
+    /// one, even while the vault is unlocked. Re-seals `device_secret`; the
+    /// caller saves the profile. Takes a moment (Argon2id).
+    pub fn set_password(&mut self, current: Option<&str>, new: Option<&str>) -> Result<()> {
+        let secret = self.open_secret(current)?;
+        if new.is_some_and(str::is_empty) {
+            bail!("the password must not be empty");
+        }
+        let was_unlocked = !self.password || unlocked().contains_key(&self.vault);
+        self.device_secret = seal_secret(&secret, new)?;
+        self.password = new.is_some();
+        // A running vault stays unlocked; a stopped one is locked from now on.
+        if self.password && was_unlocked {
+            unlocked().insert(self.vault.clone(), Arc::new(secret));
+        } else {
+            self.lock();
+        }
+        Ok(())
     }
 
     pub fn set_keyslot(&mut self, w: &WrappedKey) -> Result<()> {
@@ -263,6 +338,28 @@ impl Profile {
             .context("unlocking older key epochs")?;
         Ok(ring)
     }
+}
+
+/// Device secrets unlocked with their vault's password, by vault id.
+fn unlocked() -> std::sync::MutexGuard<'static, BTreeMap<String, Arc<DeviceSecret>>> {
+    static UNLOCKED: Mutex<BTreeMap<String, Arc<DeviceSecret>>> = Mutex::new(BTreeMap::new());
+    // A panic while holding the lock leaves the map itself intact.
+    UNLOCKED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The stored form of a device secret: its JSON under DPAPI, sealed under
+/// `password` (Argon2id) first if there is one.
+fn seal_secret(secret: &DeviceSecret, password: Option<&str>) -> Result<String> {
+    let mut json = Zeroizing::new(serde_json::to_vec(secret)?);
+    if let Some(pw) = password {
+        // Unoptimized test builds would take minutes on the real Argon2 cost.
+        #[cfg(not(test))]
+        let slot = crypto::wrap_with_password(pw, &json)?;
+        #[cfg(test)]
+        let slot = crypto::wrap_with_password_params(pw, &json, 1024, 1, 1)?;
+        json = Zeroizing::new(serde_json::to_vec(&slot)?);
+    }
+    Ok(crypto::b64::encode(&dpapi::protect(&json)?))
 }
 
 #[cfg(windows)]
@@ -328,6 +425,39 @@ mod tests {
         assert!(remove_vault_folder(&data.join(".."), "..").is_err());
         assert!(remove_vault_folder(Path::new("v"), "v").is_err());
         assert!(other.exists() && data.exists());
+    }
+
+    #[test]
+    fn password_locks_the_device_secret() {
+        let secret = DeviceSecret::generate();
+        let mut p = Profile::new("pw-test", "https://s", "n", &secret).unwrap();
+        let id = |s: DeviceSecret| s.public().unwrap().device_id();
+        assert!(!p.locked());
+
+        // Turned on while unlocked (a running vault): stays usable until locked.
+        p.set_password(None, Some("correct horse")).unwrap();
+        assert!(p.password && !p.locked());
+        assert_eq!(id(p.secret().unwrap()), p.device_id);
+        p.lock();
+        assert!(p.locked() && p.secret().is_err());
+
+        // Survives a save/load round trip; only the right password unlocks.
+        let mut p: Profile = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(p.password && p.locked());
+        assert!(p.unlock("wrong").is_err());
+        assert!(p.locked());
+        p.unlock("correct horse").unwrap();
+        assert_eq!(id(p.secret().unwrap()), p.device_id);
+
+        // Changing and removing it need the current password, unlocked or not.
+        assert!(p.set_password(Some("wrong"), Some("new one")).is_err());
+        p.set_password(Some("correct horse"), Some("new one")).unwrap();
+        p.lock();
+        assert!(p.unlock("correct horse").is_err());
+        assert!(p.set_password(None, None).is_err());
+        p.set_password(Some("new one"), None).unwrap();
+        assert!(!p.password && !p.locked());
+        assert_eq!(id(p.secret().unwrap()), p.device_id);
     }
 
     #[test]

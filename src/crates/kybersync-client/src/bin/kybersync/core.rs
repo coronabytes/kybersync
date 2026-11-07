@@ -181,7 +181,12 @@ impl Vault {
     }
 
     /// Unmount and stop; pending uploads get ten seconds in the background.
-    fn stop(&mut self, rt: &Runtime) {
+    /// With `lock`, a password-protected vault needs its password again to
+    /// mount (the engine keeps its own copy of the key while it finishes).
+    fn stop(&mut self, rt: &Runtime, lock: bool) {
+        if lock {
+            self.profile.lock();
+        }
         if let Some(m) = self.mount.take() {
             m.unmount();
         }
@@ -214,6 +219,9 @@ pub struct Core {
     /// needs rebuilding.
     pub vaults_changed: bool,
     pub updates: Updates,
+    /// Vaults that were asked to mount but need their password first; the
+    /// window asks for it, one at a time.
+    pub unlock_requests: Vec<String>,
 }
 
 impl Core {
@@ -226,6 +234,7 @@ impl Core {
             quit: false,
             vaults_changed: false,
             updates,
+            unlock_requests: Vec::new(),
         })
     }
 
@@ -244,7 +253,16 @@ impl Core {
         self.vaults.iter().position(|v| v.profile.vault == vault)
     }
 
+    /// Mount vault `i`. A locked vault isn't mounted: it is queued for the
+    /// window to ask for its password (see [`Core::unlock_requests`]).
     pub fn start(&mut self, i: usize) -> bool {
+        if self.vaults[i].mount.is_none() && self.vaults[i].profile.locked() {
+            let vault = self.vaults[i].profile.vault.clone();
+            if !self.unlock_requests.contains(&vault) {
+                self.unlock_requests.push(vault);
+            }
+            return false;
+        }
         match self.vaults[i].start(&self.rt) {
             Ok(()) => {
                 self.vaults[i].notice = None;
@@ -257,8 +275,15 @@ impl Core {
         }
     }
 
+    /// Unmount vault `i`; a password-protected vault is locked again.
     pub fn stop(&mut self, i: usize) {
-        self.vaults[i].stop(&self.rt);
+        self.vaults[i].stop(&self.rt, true);
+    }
+
+    /// Unmount vault `i` to mount it again right after (new settings, moved
+    /// chunks), without asking for its password again.
+    pub fn stop_to_remount(&mut self, i: usize) {
+        self.vaults[i].stop(&self.rt, false);
     }
 
     /// Re-read the configuration: pick up vaults added or removed, and
@@ -267,7 +292,7 @@ impl Core {
         let cfg = Config::load()?;
         for v in &mut self.vaults {
             if !cfg.vaults.iter().any(|p| p.vault == v.profile.vault) {
-                v.stop(&self.rt);
+                v.stop(&self.rt, true);
             }
         }
         self.vaults.retain(|v| cfg.vaults.iter().any(|p| p.vault == v.profile.vault));
@@ -359,7 +384,9 @@ impl Core {
             return;
         }
         let remount = self.vaults[i].mount.is_some();
-        self.stop(i);
+        if remount {
+            self.stop_to_remount(i);
+        }
         let vault = self.vaults[i].profile.vault.clone();
         let progress = Arc::new((AtomicU64::new(0), AtomicU64::new(0)));
         let p = progress.clone();

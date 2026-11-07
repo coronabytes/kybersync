@@ -1,6 +1,7 @@
 //! A vault's page: status and mounting, restoring deleted files, and the
 //! per-vault settings (maintenance included). The Devices tab is in `devices.rs`.
 
+use super::lock::{Mode, PasswordDialog};
 use super::{Busy, Dialog, Gui, Pending};
 use super::{theme, util};
 use crate::jobs::{Job, finish};
@@ -498,6 +499,35 @@ impl Gui<'_> {
             }
         });
 
+        util::section(ui, "Password", |ui| {
+            if profile.password {
+                ui.label("Mounting this vault asks for its password, in addition to your Windows sign-in.");
+                if profile.auto_mount {
+                    util::hint(ui, "It mounts when kybersync starts, so kybersync asks for the password then.");
+                }
+            } else {
+                ui.label("Mounting this vault needs only your Windows sign-in. Ask for a password too, so someone using your unlocked Windows account can't open the vault.");
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let mut open = None;
+                if profile.password {
+                    if ui.button("Change password…").clicked() {
+                        open = Some(Mode::Change);
+                    }
+                    if ui.button("Stop asking for a password…").clicked() {
+                        open = Some(Mode::Disable);
+                    }
+                } else if ui.button("Ask for a password…").clicked() {
+                    open = Some(Mode::Enable);
+                }
+                if let Some(mode) = open {
+                    self.dialog = Some(Dialog::Password(Box::new(PasswordDialog::new(profile.vault.clone(), mode))));
+                }
+            });
+            util::hint(ui, "The password protects this device's key on this PC only; other devices decide for themselves.");
+        });
+
         util::section(ui, "Encrypted chunk cache", |ui| {
             ui.label("The chunk cache is most of the space kybersync uses. It can live on another drive.");
             ui.horizontal(|ui| {
@@ -587,7 +617,7 @@ impl Gui<'_> {
             || (!s.prefetch && s.cache_mb != before.cache_mb);
         let remount = needs_remount && self.core.vaults[i].mounted();
         if remount {
-            self.core.stop(i);
+            self.core.stop_to_remount(i);
         }
         if let Err(e) = self.core.reload() {
             self.fail("Reloading the configuration failed", &e);

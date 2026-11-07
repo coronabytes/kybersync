@@ -53,7 +53,12 @@ fn main() -> Result<()> {
     core.start_auto();
 
     let silent = std::env::args().skip(1).any(|a| a == "--tray");
-    let mut next = if silent && !core.vaults.is_empty() { None } else { Some(None) };
+    // A vault that mounts at start but needs its password brings the window up.
+    let mut next = match core.unlock_requests.first() {
+        Some(v) => Some(Some(v.clone())),
+        None if silent && !core.vaults.is_empty() => None,
+        None => Some(None),
+    };
     loop {
         let select = match next.take() {
             Some(s) => s,

@@ -95,6 +95,11 @@ impl Api {
         })
     }
 
+    /// The device secret this client signs with, if any.
+    pub fn secret(&self) -> Option<&Arc<DeviceSecret>> {
+        self.secret.as_ref()
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }
