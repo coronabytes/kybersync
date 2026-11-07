@@ -6,7 +6,7 @@ use super::{Busy, Dialog, Gui, Pending};
 use super::{theme, util};
 use crate::jobs::{Job, finish};
 use crate::tray::open_path;
-use kybersync_client::config::{Config, Profile};
+use kybersync_client::config::{Config, Profile, S3Settings};
 use kybersync_client::fs::free_drives;
 use kybersync_client::setup;
 use kybersync_core::crypto;
@@ -36,6 +36,9 @@ pub struct State {
     /// Whether this device's last seen maintenance report was a run in progress.
     maint_running: bool,
     pub resend_code: String,
+    /// New access keys for a serverless vault's bucket.
+    s3_key_id: String,
+    pub s3_secret: String,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -141,15 +144,23 @@ impl Gui<'_> {
             util::hint(ui, "kybersync keeps checking in the background, also while this window is closed.");
         });
         util::section(ui, "Request not arriving?", |ui| {
-            ui.label("If the invite code expired or the request was rejected, send a new one with a fresh code:");
+            let serverless = profile.serverless();
+            if serverless {
+                ui.label("If the request was rejected or expired (after 7 days), send it again:");
+            } else {
+                ui.label("If the invite code expired or the request was rejected, send a new one with a fresh code:");
+            }
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.vault_page.resend_code).hint_text("ABCD-EFGH").desired_width(140.0));
-                let ok = !self.vault_page.resend_code.trim().is_empty();
+                if !serverless {
+                    ui.add(egui::TextEdit::singleline(&mut self.vault_page.resend_code).hint_text("ABCD-EFGH").desired_width(140.0));
+                }
+                let ok = serverless || !self.vault_page.resend_code.trim().is_empty();
                 if ui.add_enabled(ok, egui::Button::new("Send again")).clicked() {
                     let code = self.vault_page.resend_code.trim().to_string();
                     let p = profile.clone();
                     self.busy = Some(Busy::Resend(Job::spawn(self.core.rt.handle(), async move {
-                        let (_, fp) = setup::join_request(&p.server, &p.vault, &p.device_name, Some(&code)).await?;
+                        let target = kybersync_client::api::Target::of(&p);
+                        let (_, fp) = setup::join_request(&target, &p.vault, &p.device_name, Some(&code)).await?;
                         Ok(fp)
                     })));
                 }
@@ -221,7 +232,12 @@ impl Gui<'_> {
                 ui.add_space(6.0);
                 let info = e.server_info();
                 let version = if info.version.is_empty() { "—" } else { &info.version };
-                if info.backend == "s3" {
+                if let Some(s3) = &e.profile.s3 {
+                    ui.columns(2, |cols| {
+                        util::stat(&mut cols[0], "Serverless, in bucket", &s3.bucket);
+                        util::stat(&mut cols[1], "Your files, encrypted", &util::size(e.encrypted_size()));
+                    });
+                } else if info.backend == "s3" {
                     // The server doesn't count an S3 bucket; size up the files here.
                     ui.columns(3, |cols| {
                         util::stat(&mut cols[0], "Server version", version);
@@ -509,6 +525,78 @@ impl Gui<'_> {
             }
         });
 
+        if let Some(s3) = &profile.s3 {
+            util::section(ui, "Checking for changes", |ui| {
+                ui.label("Without a server, this device asks the bucket for changes from other devices at a fixed interval.");
+                ui.add_space(4.0);
+                let current = s3.poll_interval().as_secs();
+                let mut chosen = current;
+                ui.horizontal(|ui| {
+                    ui.label("Check every");
+                    egui::ComboBox::from_id_salt("s3-poll").selected_text(poll_label(current)).show_ui(ui, |ui| {
+                        for secs in kybersync_client::config::POLL_CHOICES {
+                            ui.selectable_value(&mut chosen, secs, poll_label(secs));
+                        }
+                    });
+                });
+                let per_day = kybersync_client::config::idle_requests_per_day(current);
+                util::hint(
+                    ui,
+                    &format!(
+                        "About {} requests a day while mounted, {} a month: roughly ${:.2} a month at AWS Frankfurt prices \
+                         ($0.43 per million). Shorter intervals bring other devices' changes sooner.",
+                        thousands(per_day),
+                        thousands(per_day * 30),
+                        per_day as f64 * 30.0 * 0.43 / 1_000_000.0
+                    ),
+                );
+                if chosen != current {
+                    let mut new = s3.clone();
+                    new.poll_secs = chosen;
+                    self.save_s3(&profile.vault, new, &format!("Checking for changes every {}.", poll_label(chosen)));
+                }
+            });
+
+            util::section(ui, "Bucket access keys", |ui| {
+                ui.label(format!("This vault lives in {}. Every device uses the bucket's keys directly.", s3.describe()));
+                util::hint(
+                    ui,
+                    "After revoking a device, create new keys for the bucket, enter them here on every remaining device, \
+                     then delete the old keys: until then the revoked device can still delete data (but not read it).",
+                );
+                ui.add_space(6.0);
+                let st = &mut self.vault_page;
+                egui::Grid::new("s3-keys").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                    ui.label("Access key ID");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut st.s3_key_id)
+                            .hint_text(s3.access_key_id.as_str())
+                            .desired_width(util::FIELD_WIDTH)
+                            .margin(egui::Margin::symmetric(10, 6)),
+                    );
+                    ui.end_row();
+                    ui.label("Secret access key");
+                    util::password(ui, &mut st.s3_secret);
+                    ui.end_row();
+                });
+                let ready = !st.s3_key_id.trim().is_empty() && !st.s3_secret.is_empty();
+                if ui.add_enabled(ready, egui::Button::new("Check and save keys")).clicked() {
+                    match S3Settings::new(&s3.endpoint, &s3.region, &s3.bucket, s3.path_style, &st.s3_key_id, &st.s3_secret) {
+                        Ok(mut new) => {
+                            new.poll_secs = s3.poll_secs;
+                            let vault = profile.vault.clone();
+                            let job = Job::spawn(self.core.rt.handle(), async move {
+                                kybersync_client::bucket::check_s3(&new).await?;
+                                Ok(new)
+                            });
+                            self.busy = Some(Busy::S3Keys { vault, job });
+                        }
+                        Err(e) => self.fail("These keys can't be used", &e),
+                    }
+                }
+            });
+        }
+
         util::section(ui, "Password", |ui| {
             if profile.password {
                 ui.label("Mounting this vault asks for its password, in addition to your Windows sign-in.");
@@ -604,6 +692,41 @@ impl Gui<'_> {
     }
 
     /// Save the Mounting settings; `before` is what was saved until now.
+    /// Store checked new bucket keys and restart the vault's sync with them.
+    pub(super) fn save_s3_keys(&mut self, vault: &str, s3: S3Settings) {
+        self.vault_page.s3_key_id.clear();
+        self.vault_page.s3_secret.clear();
+        self.save_s3(vault, s3, "New bucket keys saved.");
+    }
+
+    /// Store changed bucket settings and restart the vault's sync with them.
+    fn save_s3(&mut self, vault: &str, s3: S3Settings, done: &str) {
+        let r = Config::load().and_then(|mut cfg| {
+            if let Some(p) = cfg.vaults.iter_mut().find(|p| p.vault == vault) {
+                p.s3 = Some(s3);
+            }
+            cfg.save()
+        });
+        if let Err(e) = r {
+            self.fail("Saving the bucket settings failed", &e);
+            return;
+        }
+        let remount = self.core.find(vault).filter(|i| self.core.vaults[*i].mounted());
+        if let Some(i) = remount {
+            self.core.stop_to_remount(i);
+        }
+        if let Err(e) = self.core.reload() {
+            self.fail("Reloading the configuration failed", &e);
+            return;
+        }
+        if remount.is_some()
+            && let Some(i) = self.core.find(vault)
+        {
+            self.core.start(i);
+        }
+        self.toast(done);
+    }
+
     fn save_settings(&mut self, i: usize, before: &Settings) {
         let s = self.vault_page.settings.clone();
         let vault = self.core.vaults[i].profile.vault.clone();
@@ -638,4 +761,24 @@ impl Gui<'_> {
         }
         self.toast("Settings saved.");
     }
+}
+
+fn poll_label(secs: u64) -> String {
+    match secs {
+        60 => "minute".into(),
+        s => format!("{s} seconds"),
+    }
+}
+
+/// `12345` → `12,345`.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

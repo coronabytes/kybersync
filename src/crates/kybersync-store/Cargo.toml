@@ -1,0 +1,20 @@
+[package]
+name = "kybersync-store"
+description = "Storage layout of a kybersync vault on any object store (shared by server and serverless clients)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes = "1"
+futures = "0.3"
+kybersync-core = { path = "../kybersync-core" }
+object_store = "0.14"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

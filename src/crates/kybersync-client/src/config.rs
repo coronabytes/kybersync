@@ -68,6 +68,111 @@ pub struct Profile {
     /// Key epoch of `keyslot`. Later epochs live in the vault's `keys.json`.
     #[serde(default)]
     pub epoch: u32,
+    /// Serverless vault: the bucket the client reads and writes directly.
+    /// `server` then only holds a description of it for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3: Option<S3Settings>,
+}
+
+/// Where a serverless vault keeps its data: an S3 bucket (AWS, the AWS
+/// European Sovereign Cloud or any compatible service), reached through the
+/// AWS SDK. Every device of the vault uses the same bucket; the secret access
+/// key is stored DPAPI-protected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct S3Settings {
+    /// `https://…` of an S3-compatible service; empty for AWS itself (the
+    /// SDK picks the endpoint from the region, `amazonaws.eu` for `eusc-…`).
+    #[serde(default)]
+    pub endpoint: String,
+    /// Path-style requests (`endpoint/bucket/key`) instead of virtual-hosted
+    /// ones (`bucket.endpoint/key`).
+    #[serde(default = "yes")]
+    pub path_style: bool,
+    pub region: String,
+    pub bucket: String,
+    pub access_key_id: String,
+    /// DPAPI-protected secret access key (base64).
+    pub secret_access_key: String,
+    /// Seconds between checks for changes from other devices (0: default).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub poll_secs: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// Seconds between checks for changes in a serverless vault, by default.
+pub const DEFAULT_POLL_SECS: u64 = 5;
+/// Poll intervals offered in the settings.
+pub const POLL_CHOICES: [u64; 6] = [2, 5, 10, 15, 30, 60];
+/// How long the sync loop waits for news before reading the log again.
+pub const LONG_POLL_SECS: u64 = 30;
+
+/// Requests a mounted, idle device sends a serverless vault's bucket per day
+/// when it checks every `poll_secs`: per sync cycle (30 s, or one interval
+/// if longer) one HEAD per interval, plus the log check (a GET and a HEAD).
+pub fn idle_requests_per_day(poll_secs: u64) -> u64 {
+    let poll = poll_secs.max(1);
+    let cycle = poll.max(LONG_POLL_SECS);
+    86_400 / cycle * (cycle.div_ceil(poll) - 1 + 2)
+}
+
+impl S3Settings {
+    /// Check the settings and seal `secret_access_key` with DPAPI.
+    pub fn new(
+        endpoint: &str,
+        region: &str,
+        bucket: &str,
+        path_style: bool,
+        access_key_id: &str,
+        secret_access_key: &str,
+    ) -> Result<Self> {
+        let endpoint = endpoint.trim().trim_end_matches('/');
+        if !endpoint.is_empty() {
+            crate::api::ensure_server_url(endpoint).context("S3 endpoint")?;
+        }
+        let (region, bucket, key_id) = (region.trim(), bucket.trim(), access_key_id.trim());
+        if region.is_empty() {
+            bail!("the S3 region is required (use \"auto\" for Cloudflare R2, \"us-east-1\" when the service doesn't care)");
+        }
+        if bucket.is_empty() || bucket.contains('/') || bucket.chars().any(char::is_whitespace) {
+            bail!("invalid bucket name {bucket:?}");
+        }
+        if key_id.is_empty() || secret_access_key.is_empty() {
+            bail!("the access key id and the secret access key are required");
+        }
+        Ok(Self {
+            endpoint: endpoint.into(),
+            path_style,
+            region: region.into(),
+            bucket: bucket.into(),
+            access_key_id: key_id.into(),
+            secret_access_key: crypto::b64::encode(&dpapi::protect(secret_access_key.trim().as_bytes())?),
+            poll_secs: 0,
+        })
+    }
+
+    /// The secret access key, unsealed.
+    pub fn secret(&self) -> Result<Zeroizing<String>> {
+        let blob = crypto::b64::decode(&self.secret_access_key)?;
+        let raw = Zeroizing::new(dpapi::unprotect(&blob).context("DPAPI: cannot unprotect the S3 secret key (different Windows user?)")?);
+        Ok(Zeroizing::new(String::from_utf8(raw.to_vec()).context("S3 secret key")?))
+    }
+
+    /// Where the vault lives, for display (`s3://bucket @ host`).
+    pub fn describe(&self) -> String {
+        let host = match self.endpoint.split_once("://") {
+            Some((_, host)) => host.to_string(),
+            None if self.region.starts_with("eusc-") => format!("AWS European Sovereign Cloud ({})", self.region),
+            None => format!("AWS ({})", self.region),
+        };
+        format!("s3://{} @ {host}", self.bucket)
+    }
+
+    pub fn poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(if self.poll_secs == 0 { DEFAULT_POLL_SECS } else { self.poll_secs.clamp(1, 300) })
+    }
 }
 
 /// The newest key this device holds (wrapped to its own hybrid KEM key) and
@@ -210,7 +315,20 @@ impl Profile {
             password: false,
             keyslot: String::new(),
             epoch: 0,
+            s3: None,
         })
+    }
+
+    /// A profile for a serverless vault in the bucket `s3`.
+    pub fn new_s3(vault: &str, s3: S3Settings, device_name: &str, secret: &DeviceSecret) -> Result<Self> {
+        let mut p = Self::new(vault, &s3.describe(), device_name, secret)?;
+        p.s3 = Some(s3);
+        Ok(p)
+    }
+
+    /// The vault has no server: devices use its bucket directly.
+    pub fn serverless(&self) -> bool {
+        self.s3.is_some()
     }
 
     /// Where the encrypted chunk cache lives.
