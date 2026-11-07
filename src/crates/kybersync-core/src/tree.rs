@@ -223,11 +223,10 @@ impl ChainState {
             if rec.commit.head != self.head {
                 return Err(diverged(format!("was written for position #{}: the server moved it", rec.commit.head + 1)));
             }
-            if let Some(last) = self.last {
-                if rec.commit.prev != last && !(rec.commit.prev == GENESIS && self.head > 0) {
+            if let Some(last) = self.last
+                && rec.commit.prev != last && !(rec.commit.prev == GENESIS && self.head > 0) {
                     return Err(diverged("does not continue the history this device has: the entry before it was altered, replaced or reordered".into()));
                 }
-            }
         }
         self.head = seq;
         self.last = Some(record_hash(data));
@@ -731,14 +730,13 @@ impl Tree {
     fn index_remove(&mut self, id: NodeId) {
         let e = &self.nodes[&id].entry;
         let key = e.name.to_lowercase();
-        if let Some(dir) = self.index.get_mut(&e.parent) {
-            if let Some(v) = dir.get_mut(&key) {
+        if let Some(dir) = self.index.get_mut(&e.parent)
+            && let Some(v) = dir.get_mut(&key) {
                 v.retain(|x| *x != id);
                 if v.is_empty() {
                     dir.remove(&key);
                 }
             }
-        }
     }
 
     // ----- queries --------------------------------------------------------

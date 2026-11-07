@@ -589,11 +589,10 @@ impl Engine {
             st.next_local += 1;
             st.view.apply_commit(local, &commit);
             for op in &commit.ops {
-                if let Op::Delete { id, base } = op {
-                    if let Some(n) = st.view.get(*id) {
+                if let Op::Delete { id, base } = op
+                    && let Some(n) = st.view.get(*id) {
                         tracing::warn!(id = format!("{id:x}"), base, node_seq = n.seq, local, "local delete was not applied to view");
                     }
-                }
             }
             st.pending.push(Pending { local, commit, uploaded: None });
             self.persist_pending(&st)?;

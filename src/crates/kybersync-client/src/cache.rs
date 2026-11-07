@@ -166,11 +166,10 @@ pub fn move_chunk_dir(vault: &str, to: Option<&Path>, progress: &dyn Fn(u64, u64
         }
     }
     cfg.save()?;
-    if old.exists() && !same_dir(&old, &new) {
-        if let Err(e) = config::remove_vault_folder(&old, vault) {
+    if old.exists() && !same_dir(&old, &new)
+        && let Err(e) = config::remove_vault_folder(&old, vault) {
             tracing::warn!("removing the old chunk folder: {e:#}");
         }
-    }
     Ok(new)
 }
 

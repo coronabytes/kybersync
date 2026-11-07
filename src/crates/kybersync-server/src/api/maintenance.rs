@@ -109,11 +109,10 @@ pub(super) async fn take_lease(
         }
     }
     let mut m = auth.vault.maint.lock().await;
-    if let Some(l) = m.active_lease() {
-        if l.device_id != auth.device_id {
+    if let Some(l) = m.active_lease()
+        && l.device_id != auth.device_id {
             return Err(ApiError::Conflict(format!("{} is already running on another device", l.task)));
         }
-    }
     let ttl = st.policy.lease_ttl;
     let id = hex::encode(crypto::random::<16>());
     m.lease = Some(Lease {

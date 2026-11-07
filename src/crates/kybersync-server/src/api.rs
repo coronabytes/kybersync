@@ -1022,8 +1022,8 @@ async fn append_log(
     let meta = auth.vault.meta.read().await;
     check_epoch(&body, meta.epoch)?;
     let head_moved = || ApiError::Conflict(format!("{HEAD_MOVED}, retry"));
-    if let Some(expected) = q.head {
-        if expected != *auth.vault.head.borrow() {
+    if let Some(expected) = q.head
+        && expected != *auth.vault.head.borrow() {
             // Possibly another server instance wrote: resync before refusing.
             let head = st.store.load_head(&auth.vault_id).await?.max(*auth.vault.head.borrow());
             auth.vault.head.send_replace(head);
@@ -1031,7 +1031,6 @@ async fn append_log(
                 return Err(head_moved());
             }
         }
-    }
     let seq = *auth.vault.head.borrow() + 1;
     match st.store.create(&Store::log_path(&auth.vault_id, seq), body).await? {
         PutOutcome::Created => {}
