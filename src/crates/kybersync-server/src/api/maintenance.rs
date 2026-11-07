@@ -27,39 +27,22 @@ pub(super) async fn purge_stale_joins(
 
 impl AppState {
     pub(super) async fn maintenance_status_of(&self, vault_id: &str, vault: &Vault) -> ApiResult<MaintenanceStatus> {
-        let head = *vault.head.borrow();
-        let log_start = vault.log_start.load(Ordering::SeqCst);
         let snapshot = self.store.latest_snapshot_seq(vault_id).await?;
-        let covered = snapshot.unwrap_or(0).max(log_start.saturating_sub(1));
-        let commits_since_snapshot = head.saturating_sub(covered);
-        let now = kybersync_core::tree::now_unix();
-        let p = &self.policy;
         let mut m = vault.maint.lock().await;
-        let last_compact = m.record.last_compact;
-        // A new vault counts as freshly cleaned, so GC isn't due on day one.
-        let last_gc = m.record.last_gc.max(vault.created);
-        let compact_due = p.compact_after > 0
-            && commits_since_snapshot >= p.compact_after
-            && now.saturating_sub(last_compact) >= p.compact_min_interval.as_secs();
-        let gc_due = !p.gc_interval.is_zero() && now.saturating_sub(last_gc) >= p.gc_interval.as_secs();
         let lease = m.active_lease().map(|l| LeaseInfo {
             task: l.task,
             device_id: l.device_id.clone(),
             expires_in: l.expires.saturating_duration_since(Instant::now()).as_secs(),
         });
-        Ok(MaintenanceStatus {
-            head,
-            log_start,
+        let state = kybersync_store::VaultState {
+            head: *vault.head.borrow(),
+            log_start: vault.log_start.load(Ordering::SeqCst),
             snapshot,
-            commits_since_snapshot,
-            last_compact,
-            last_gc: m.record.last_gc,
-            compact_due,
-            gc_due,
-            gc_grace_secs: p.gc_grace.as_secs().max(self.min_gc_grace.as_secs()),
-            trash_secs: p.trash.as_secs(),
+            record: m.record.clone(),
+            created: vault.created,
             lease,
-        })
+        };
+        Ok(self.policy.status(state, self.min_gc_grace, kybersync_core::tree::now_unix()))
     }
 
     /// Refuse compaction/GC while another device holds the maintenance lease.

@@ -1,6 +1,9 @@
-//! HTTP client for the kybersync server.
+//! The vault's storage as the sync engine sees it: either the kybersync
+//! server over HTTPS ([`HttpApi`]) or, for a serverless vault, an S3 bucket
+//! used directly ([`BucketApi`]). Both report the same errors, so the engine
+//! doesn't care which one it talks to.
 //!
-//! Uses rustls with the aws-lc-rs provider, which negotiates the hybrid
+//! The HTTP client uses rustls with the aws-lc-rs provider, which negotiates the hybrid
 //! X25519MLKEM768 post-quantum key exchange when the server (or reverse proxy)
 //! supports it.
 
@@ -10,6 +13,7 @@ use kybersync_core::proto::*;
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+pub use crate::bucket::BucketApi;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -29,8 +33,170 @@ pub enum ApiError {
     Transport(String),
 }
 
+/// Where a vault lives.
+#[derive(Clone, Debug)]
+pub enum Target {
+    /// A kybersync server URL.
+    Server(String),
+    /// A serverless vault in an S3 bucket.
+    S3(crate::config::S3Settings),
+}
+
+impl Target {
+    pub fn of(profile: &crate::config::Profile) -> Self {
+        match &profile.s3 {
+            Some(s3) => Target::S3(s3.clone()),
+            None => Target::Server(profile.server.clone()),
+        }
+    }
+
+    /// For display and for the `server` field of a profile.
+    pub fn describe(&self) -> String {
+        match self {
+            Target::Server(url) => url.trim_end_matches('/').to_string(),
+            Target::S3(s3) => s3.describe(),
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct Api {
+pub enum Api {
+    Http(HttpApi),
+    Bucket(BucketApi),
+}
+
+macro_rules! dispatch {
+    ($self:ident.$m:ident($($a:expr),*)) => {
+        match $self {
+            Api::Http(api) => api.$m($($a),*).await,
+            Api::Bucket(api) => api.$m($($a),*).await,
+        }
+    };
+}
+
+impl Api {
+    /// A client for a kybersync server.
+    pub fn new(server: &str, vault: &str, device_id: &str, secret: Option<Arc<DeviceSecret>>) -> Result<Self> {
+        Ok(Api::Http(HttpApi::new(server, vault, device_id, secret)?))
+    }
+
+    pub fn for_target(target: &Target, vault: &str, device_id: &str, secret: Option<Arc<DeviceSecret>>) -> Result<Self> {
+        match target {
+            Target::Server(url) => Self::new(url, vault, device_id, secret),
+            Target::S3(s3) => Ok(Api::Bucket(BucketApi::s3(s3, vault, device_id, secret)?)),
+        }
+    }
+
+    pub fn for_profile(profile: &crate::config::Profile, secret: Option<Arc<DeviceSecret>>) -> Result<Self> {
+        Self::for_target(&Target::of(profile), &profile.vault, &profile.device_id, secret)
+    }
+
+    /// The device secret this client signs with, if any.
+    pub fn secret(&self) -> Option<&Arc<DeviceSecret>> {
+        match self {
+            Api::Http(api) => api.secret(),
+            Api::Bucket(api) => api.secret(),
+        }
+    }
+
+    /// No server: the client works on the bucket itself.
+    pub fn serverless(&self) -> bool {
+        matches!(self, Api::Bucket(_))
+    }
+
+    pub async fn create_vault(&self, admin_token: &str, req: &CreateVaultRequest) -> Result<()> {
+        dispatch!(self.create_vault(admin_token, req))
+    }
+    pub async fn join(&self, device: DeviceInfo, code: &str) -> Result<DeviceState> {
+        dispatch!(self.join(device, code))
+    }
+    pub async fn join_status(&self) -> Result<DeviceState> {
+        dispatch!(self.join_status())
+    }
+    pub async fn enroll(&self, req: &EnrollRequest) -> Result<()> {
+        dispatch!(self.enroll(req))
+    }
+    pub async fn recovery_for_kit(&self, recovery_id: &str) -> Result<RecoveryResponse> {
+        dispatch!(self.recovery_for_kit(recovery_id))
+    }
+    pub async fn challenge(&self, device_id: &str) -> Result<Vec<u8>> {
+        dispatch!(self.challenge(device_id))
+    }
+    pub async fn devices(&self) -> Result<Vec<DeviceInfo>> {
+        dispatch!(self.devices())
+    }
+    pub async fn invite(&self) -> Result<InviteResponse, ApiError> {
+        dispatch!(self.invite())
+    }
+    pub async fn recovery(&self) -> Result<RecoveryResponse, ApiError> {
+        dispatch!(self.recovery())
+    }
+    pub async fn approve(&self, device_id: &str, keyslot: Vec<u8>, epoch: u32) -> Result<(), ApiError> {
+        dispatch!(self.approve(device_id, keyslot, epoch))
+    }
+    pub async fn revoke(&self, device_id: &str) -> Result<()> {
+        dispatch!(self.revoke(device_id))
+    }
+    pub async fn rotate(&self, req: &RotateRequest) -> Result<(), ApiError> {
+        dispatch!(self.rotate(req))
+    }
+    pub async fn keyslot(&self) -> Result<(u32, Vec<u8>), ApiError> {
+        dispatch!(self.keyslot())
+    }
+    pub async fn keychain(&self) -> Result<KeychainResponse, ApiError> {
+        dispatch!(self.keychain())
+    }
+    pub async fn put_blob(&self, id: &ChunkId, data: Vec<u8>) -> Result<(), ApiError> {
+        dispatch!(self.put_blob(id, data))
+    }
+    pub async fn get_blob(&self, id: &ChunkId) -> Result<Vec<u8>, ApiError> {
+        dispatch!(self.get_blob(id))
+    }
+    pub async fn missing(&self, ids: &[ChunkId]) -> Result<Vec<ChunkId>, ApiError> {
+        dispatch!(self.missing(ids))
+    }
+    pub async fn append(&self, record: Vec<u8>, head: Option<u64>) -> Result<u64, ApiError> {
+        dispatch!(self.append(record, head))
+    }
+    pub async fn read_log(&self, after: u64) -> Result<Vec<(u64, Vec<u8>)>, ApiError> {
+        dispatch!(self.read_log(after))
+    }
+    pub async fn snapshot(&self) -> Result<Option<(u64, Vec<u8>)>, ApiError> {
+        dispatch!(self.snapshot())
+    }
+    pub async fn put_snapshot(&self, seq: u64, record: Vec<u8>) -> Result<(), ApiError> {
+        dispatch!(self.put_snapshot(seq, record))
+    }
+    pub async fn compact(&self, upto: u64) -> Result<u64, ApiError> {
+        dispatch!(self.compact(upto))
+    }
+    pub async fn list_blobs(&self, prefix: &str) -> Result<Vec<BlobInfo>, ApiError> {
+        dispatch!(self.list_blobs(prefix))
+    }
+    pub async fn gc(&self, req: &GcRequest) -> Result<GcResponse, ApiError> {
+        dispatch!(self.gc(req))
+    }
+    pub async fn maintenance(&self) -> Result<MaintenanceStatus, ApiError> {
+        dispatch!(self.maintenance())
+    }
+    pub async fn storage(&self) -> Result<StorageInfo, ApiError> {
+        dispatch!(self.storage())
+    }
+    pub async fn take_lease(&self, task: MaintenanceTask, force: bool) -> Result<Option<LeaseResponse>, ApiError> {
+        dispatch!(self.take_lease(task, force))
+    }
+    pub async fn release_lease(&self, lease: &str, success: bool) -> Result<(), ApiError> {
+        dispatch!(self.release_lease(lease, success))
+    }
+    /// Wait up to `wait_secs` for the log head to move past `after`.
+    pub async fn head(&self, after: u64, wait_secs: u64) -> Result<u64, ApiError> {
+        dispatch!(self.head(after, wait_secs))
+    }
+}
+
+/// HTTP client for the kybersync server.
+#[derive(Clone)]
+pub struct HttpApi {
     http: reqwest::Client,
     base: String,
     vault: String,
@@ -72,7 +238,7 @@ fn transport(e: reqwest::Error) -> ApiError {
     ApiError::Transport(format!("{e:#}"))
 }
 
-impl Api {
+impl HttpApi {
     pub fn new(server: &str, vault: &str, device_id: &str, secret: Option<Arc<DeviceSecret>>) -> Result<Self> {
         // Checked here too, so profiles saved before the check existed can't
         // send tokens in the clear.

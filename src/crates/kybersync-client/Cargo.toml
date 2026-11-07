@@ -13,13 +13,17 @@ path = "src/bin/kybersync/main.rs"
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
+bytes = "1"
 crc32fast = "1"
 flate2 = "1"
 kybersync-core = { path = "../kybersync-core" }
+kybersync-store = { path = "../kybersync-store" }
 egui = "0.37"
 eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
 futures = "0.3"
 hex.workspace = true
+object_store = "0.14"
+async-trait = "0.1"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 reqwest = { version = "0.13", features = ["json"] }
 rfd = "0.17"
@@ -31,6 +35,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zeroize.workspace = true
+aws-sdk-s3 = { version = "1.157.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = { version = "0.26", default-features = false }
@@ -54,3 +60,4 @@ winfsp = { version = "0.13", default-features = false, features = ["delayload"] 
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

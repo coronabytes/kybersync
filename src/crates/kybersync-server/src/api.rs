@@ -6,7 +6,8 @@ pub use maintenance::spawn_sweeper;
 pub use maintenance::sweep;
 use maintenance::{maintenance_status, purge_stale_joins, release_lease, take_lease};
 use ratelimit::RateLimiter;
-use crate::store::{MaintenanceRecord, PutOutcome, Store, VaultMeta};
+pub use kybersync_store::MaintenancePolicy;
+use kybersync_store::{MAX_PENDING, MIN_GC_GRACE, MaintenanceRecord, PENDING_TTL_SECS, PutOutcome, Store, VaultMeta};
 use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
@@ -32,48 +33,12 @@ const INVITE_TTL: Duration = Duration::from_secs(3600);
 const MAX_INVITES: usize = 64;
 /// Requests per minute a client may send to the unauthenticated routes.
 pub const DEFAULT_RATE_LIMIT: u32 = 30;
-const MAX_PENDING: usize = 32;
-const PENDING_TTL_SECS: u64 = 7 * 24 * 3600;
 const MAX_BLOB: usize = kybersync_core::CHUNK_SIZE + 4096;
 const MAX_COMMIT: usize = 64 * 1024 * 1024;
 const MAX_LOG_RESPONSE: usize = 32 * 1024 * 1024;
-/// Blobs younger than this are never garbage collected, whatever the client
-/// asks: covers the window between a client uploading chunks and appending
-/// the commit that references them.
-const MIN_GC_GRACE: Duration = Duration::from_secs(3600);
 /// How long a vault's counted size is reused before it is counted again
 /// (counting lists every object of the vault).
 const USAGE_TTL: Duration = Duration::from_secs(300);
-
-/// When devices are asked to compact the log and garbage-collect blobs.
-#[derive(Clone, Debug)]
-pub struct MaintenancePolicy {
-    /// Compact once this many commits follow the latest snapshot (0: never).
-    pub compact_after: u64,
-    /// Minimum time between automatic compactions.
-    pub compact_min_interval: Duration,
-    /// Run blob GC this often (zero: never automatically).
-    pub gc_interval: Duration,
-    /// Grace period devices use for blob GC.
-    pub gc_grace: Duration,
-    /// How long deleted files stay restorable (devices keep their blobs).
-    pub trash: Duration,
-    /// How long a device may hold the maintenance lease.
-    pub lease_ttl: Duration,
-}
-
-impl Default for MaintenancePolicy {
-    fn default() -> Self {
-        Self {
-            compact_after: 1000,
-            compact_min_interval: Duration::from_secs(3600),
-            gc_interval: Duration::from_secs(24 * 3600),
-            gc_grace: Duration::from_secs(7 * 24 * 3600),
-            trash: Duration::from_secs(default_trash_secs()),
-            lease_ttl: Duration::from_secs(3600),
-        }
-    }
-}
 
 /// Where the server keeps its data, as reported to devices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -499,17 +464,7 @@ impl FromRequestParts<Arc<AppState>> for Authed {
 }
 
 fn check_device(d: &DeviceInfo) -> ApiResult<()> {
-    if !valid_device_id(&d.device_id) {
-        return Err(ApiError::bad("invalid device id"));
-    }
-    d.public.validate().map_err(|e| ApiError::bad(e.to_string()))?;
-    if d.public.device_id() != d.device_id {
-        return Err(ApiError::bad("device id does not match public keys"));
-    }
-    if d.name.is_empty() || d.name.len() > 64 || d.name.chars().any(|c| c.is_control()) {
-        return Err(ApiError::bad("invalid device name"));
-    }
-    Ok(())
+    kybersync_store::validate_device(d).map_err(ApiError::BadRequest)
 }
 
 // ---------------------------------------------------------------------------
@@ -553,11 +508,7 @@ async fn create_vault(
 }
 
 fn check_recovery(r: &RecoveryUpdate) -> ApiResult<()> {
-    r.public.validate().map_err(|e| ApiError::bad(format!("recovery identity: {e}")))?;
-    if r.mac.len() != 64 || !r.mac.bytes().all(|b| b.is_ascii_hexdigit()) || r.keyslot.is_empty() {
-        return Err(ApiError::bad("invalid recovery binding"));
-    }
-    Ok(())
+    kybersync_store::validate_recovery(r).map_err(ApiError::BadRequest)
 }
 
 /// Mint a one-time invite code for `/join`. Only its hash is kept, and only

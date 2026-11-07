@@ -4,7 +4,6 @@
 mod api;
 #[cfg(test)]
 mod api_tests;
-mod store;
 mod update;
 
 use anyhow::{Context, Result, bail};
@@ -164,7 +163,7 @@ async fn serve() -> Result<()> {
         ..Default::default()
     };
     tracing::info!(?policy, "maintenance policy");
-    let mut state = api::AppState::new(store::Store::new(backend), admin_token)
+    let mut state = api::AppState::new(kybersync_store::Store::new(backend), admin_token)
         .with_policy(policy)
         .with_rate_limit(args.rate_limit_per_minute);
     state = match args.storage {

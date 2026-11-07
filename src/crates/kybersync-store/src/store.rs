@@ -13,6 +13,8 @@
 //! vaults/{vault}/snapshots/{seq:020}       encrypted tree snapshot at seq (opaque)
 //! vaults/{vault}/head                      hint: last known seq
 //! vaults/{vault}/maintenance.json          when compaction / blob GC last completed
+//! vaults/{vault}/lease.json                maintenance lease (serverless vaults only;
+//!                                          the server keeps its lease in memory)
 //! ```
 //!
 //! A key rotation writes the new epoch's objects first and `meta.json` last,
@@ -24,7 +26,7 @@ use kybersync_core::crypto::ChainLink;
 use kybersync_core::proto::{BlobInfo, DeviceInfo, RecoveryInfo};
 use futures::TryStreamExt;
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -58,6 +60,16 @@ pub struct MaintenanceRecord {
 pub enum PutOutcome {
     Created,
     AlreadyExists,
+}
+
+/// The maintenance lease of a serverless vault, stored in `lease.json`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredLease {
+    pub id: String,
+    pub task: kybersync_core::proto::MaintenanceTask,
+    pub device_id: String,
+    /// Unix seconds after which another device may take over.
+    pub expires: u64,
 }
 
 impl Store {
@@ -131,6 +143,32 @@ impl Store {
         }
     }
 
+    /// The object and the version to pass to [`Store::update`].
+    pub async fn get_versioned(&self, path: &Path) -> Result<Option<(Bytes, UpdateVersion)>> {
+        match self.inner.get(path).await {
+            Ok(r) => {
+                let version = UpdateVersion { e_tag: r.meta.e_tag.clone(), version: r.meta.version.clone() };
+                Ok(Some((r.bytes().await?, version)))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Replace the object only if it is still at `version` (`If-Match`).
+    /// Returns `false` when someone else changed or deleted it meanwhile.
+    pub async fn update(&self, path: &Path, data: Bytes, version: UpdateVersion) -> Result<bool> {
+        let opts = PutOptions { mode: PutMode::Update(version), ..Default::default() };
+        match self.inner.put_opts(path, PutPayload::from(data), opts).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::Precondition { .. } | object_store::Error::NotFound { .. }) => Ok(false),
+            Err(object_store::Error::NotImplemented { .. }) => {
+                Err(anyhow::anyhow!("storage backend does not support conditional updates (If-Match)"))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     // ----- typed helpers ---------------------------------------------------
 
     pub async fn meta(&self, vault: &str) -> Result<Option<VaultMeta>> {
@@ -142,6 +180,35 @@ impl Store {
 
     pub async fn create_meta(&self, vault: &str, meta: &VaultMeta) -> Result<PutOutcome> {
         self.create(&Self::p(vault, "meta.json"), serde_json::to_vec(meta)?.into()).await
+    }
+
+    /// `meta.json` and its version, for a compare-and-swap with [`Store::update_meta`].
+    pub async fn meta_versioned(&self, vault: &str) -> Result<Option<(VaultMeta, UpdateVersion)>> {
+        match self.get_versioned(&Self::p(vault, "meta.json")).await? {
+            Some((b, v)) => Ok(Some((serde_json::from_slice(&b).context("meta.json")?, v))),
+            None => Ok(None),
+        }
+    }
+
+    /// Replace `meta.json` only if it is still at `version`.
+    pub async fn update_meta(&self, vault: &str, meta: &VaultMeta, version: UpdateVersion) -> Result<bool> {
+        self.update(&Self::p(vault, "meta.json"), serde_json::to_vec(meta)?.into(), version).await
+    }
+
+    fn device_path(vault: &str, id: &str) -> Path {
+        Self::p(vault, &format!("devices/{id}.json"))
+    }
+
+    pub async fn device(&self, vault: &str, id: &str) -> Result<Option<DeviceInfo>> {
+        match self.get(&Self::device_path(vault, id)).await? {
+            Some(b) => Ok(Some(serde_json::from_slice(&b).context("device record")?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Write a device record only if the device has none yet.
+    pub async fn create_device(&self, vault: &str, d: &DeviceInfo) -> Result<PutOutcome> {
+        self.create(&Self::device_path(vault, &d.device_id), serde_json::to_vec(d)?.into()).await
     }
 
     pub async fn devices(&self, vault: &str) -> Result<Vec<DeviceInfo>> {
@@ -160,12 +227,12 @@ impl Store {
     }
 
     pub async fn put_device(&self, vault: &str, d: &DeviceInfo) -> Result<()> {
-        self.put(&Self::p(vault, &format!("devices/{}.json", d.device_id)), serde_json::to_vec(d)?.into()).await
+        self.put(&Self::device_path(vault, &d.device_id), serde_json::to_vec(d)?.into()).await
     }
 
     /// Remove a device record and its keyslots of every epoch up to `epoch`.
     pub async fn delete_device(&self, vault: &str, id: &str, epoch: u32) -> Result<()> {
-        self.delete(&Self::p(vault, &format!("devices/{id}.json"))).await?;
+        self.delete(&Self::device_path(vault, id)).await?;
         self.delete_keyslots(vault, id, 0..=epoch).await
     }
 
@@ -197,14 +264,33 @@ impl Store {
     }
 
     pub async fn put_link(&self, vault: &str, link: &ChainLink) -> Result<()> {
-        self.put(&Self::p(vault, &format!("epochs/{}/chain", link.epoch)), serde_json::to_vec(link)?.into()).await
+        self.put(&Self::link_path(vault, link.epoch), serde_json::to_vec(link)?.into()).await
+    }
+
+    fn link_path(vault: &str, epoch: u32) -> Path {
+        Self::p(vault, &format!("epochs/{epoch}/chain"))
+    }
+
+    /// Write the chain link of a new epoch only if there is none yet: the
+    /// first writer claims the epoch (serverless rotation).
+    pub async fn create_link(&self, vault: &str, link: &ChainLink) -> Result<PutOutcome> {
+        self.create(&Self::link_path(vault, link.epoch), serde_json::to_vec(link)?.into()).await
+    }
+
+    /// Upload time of an epoch's chain link, if it exists.
+    pub async fn link_modified(&self, vault: &str, epoch: u32) -> Result<Option<u64>> {
+        self.modified(&Self::link_path(vault, epoch)).await
+    }
+
+    pub async fn delete_link(&self, vault: &str, epoch: u32) -> Result<()> {
+        self.delete(&Self::link_path(vault, epoch)).await
     }
 
     /// Chain links for epochs `1..=epoch`.
     pub async fn links(&self, vault: &str, epoch: u32) -> Result<Vec<ChainLink>> {
         let mut out = Vec::new();
         for e in 1..=epoch {
-            let path = Self::p(vault, &format!("epochs/{e}/chain"));
+            let path = Self::link_path(vault, e);
             let b = self.get(&path).await?.with_context(|| format!("chain link {e} missing"))?;
             out.push(serde_json::from_slice(&b).context("chain link")?);
         }
@@ -300,10 +386,7 @@ impl Store {
     /// Find the current log head: start from the hint and probe forward, so a
     /// crash between writing a commit and updating the hint is harmless.
     pub async fn load_head(&self, vault: &str) -> Result<u64> {
-        let hint = match self.get(&Self::p(vault, "head")).await? {
-            Some(b) => std::str::from_utf8(&b).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0),
-            None => 0,
-        };
+        let hint = self.head_hint(vault).await?;
         // Compacted entries are gone, but the head is at least the last of them.
         let mut head = hint.max(self.log_start(vault).await? - 1);
         while self.exists(&Self::log_path(vault, head + 1)).await? {
@@ -314,6 +397,25 @@ impl Store {
 
     pub async fn put_head_hint(&self, vault: &str, head: u64) -> Result<()> {
         self.put(&Self::p(vault, "head"), Bytes::from(head.to_string())).await
+    }
+
+    /// Seqs of the log entries after `after` that exist, in order, from one
+    /// listing (S3: `ListObjectsV2` with `StartAfter`).
+    pub async fn log_seqs_after(&self, vault: &str, after: u64) -> Result<Vec<u64>> {
+        let prefix = Self::p(vault, "log");
+        let offset = Self::log_path(vault, after);
+        let metas: Vec<_> = self.inner.list_with_offset(Some(&prefix), &offset).try_collect().await?;
+        let mut seqs: Vec<u64> =
+            metas.iter().filter_map(|m| m.location.filename()?.parse().ok()).filter(|s| *s > after).collect();
+        seqs.sort_unstable();
+        Ok(seqs)
+    }
+
+    pub async fn head_hint(&self, vault: &str) -> Result<u64> {
+        Ok(match self.get(&Self::p(vault, "head")).await? {
+            Some(b) => std::str::from_utf8(&b).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0),
+            None => 0,
+        })
     }
 
     // ----- maintenance -----------------------------------------------------
@@ -360,5 +462,32 @@ impl Store {
             }
         }
         Ok(n)
+    }
+
+    // ----- maintenance lease (serverless vaults) ----------------------------
+
+    fn lease_path(vault: &str) -> Path {
+        Self::p(vault, "lease.json")
+    }
+
+    pub async fn lease(&self, vault: &str) -> Result<Option<(StoredLease, UpdateVersion)>> {
+        match self.get_versioned(&Self::lease_path(vault)).await? {
+            Some((b, v)) => Ok(Some((serde_json::from_slice(&b).context("lease.json")?, v))),
+            None => Ok(None),
+        }
+    }
+
+    /// Take the lease: create it when there is none, or replace `previous`
+    /// (an expired lease) only if nobody else replaced it first.
+    pub async fn take_lease(&self, vault: &str, lease: &StoredLease, previous: Option<UpdateVersion>) -> Result<bool> {
+        let data: Bytes = serde_json::to_vec(lease)?.into();
+        match previous {
+            None => Ok(matches!(self.create(&Self::lease_path(vault), data).await?, PutOutcome::Created)),
+            Some(v) => self.update(&Self::lease_path(vault), data, v).await,
+        }
+    }
+
+    pub async fn delete_lease(&self, vault: &str) -> Result<()> {
+        self.delete(&Self::lease_path(vault)).await
     }
 }

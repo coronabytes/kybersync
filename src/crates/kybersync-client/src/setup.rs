@@ -17,7 +17,7 @@
 //! * `rotate`  – start a new key epoch, revoking devices: the new key goes
 //!   only to the remaining devices and the recovery identity.
 
-use crate::api::{Api, ApiError, ensure_server_url};
+use crate::api::{Api, ApiError, Target, ensure_server_url};
 use crate::config::{Config, KeyState, Profile};
 use anyhow::{Context, Result, bail};
 use kybersync_core::crypto::{self, DeviceSecret, KeyRing, PasswordSlot, VaultKey, WrappedKey};
@@ -52,6 +52,56 @@ pub struct RecoveryKit {
     pub vault_commitment: String,
     #[serde(default)]
     pub recovery_id: String,
+    /// A serverless vault's bucket (without its keys, which the kit doesn't
+    /// hold); `server` then only describes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3: Option<KitBucket>,
+}
+
+/// Where a serverless vault lives, as written into its recovery kit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KitBucket {
+    #[serde(default)]
+    pub endpoint: String,
+    pub region: String,
+    pub bucket: String,
+    #[serde(default = "yes")]
+    pub path_style: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl KitBucket {
+    fn of(target: &Target) -> Option<Self> {
+        match target {
+            Target::S3(s3) => Some(KitBucket {
+                endpoint: s3.endpoint.clone(),
+                region: s3.region.clone(),
+                bucket: s3.bucket.clone(),
+                path_style: s3.path_style,
+            }),
+            Target::Server(_) => None,
+        }
+    }
+}
+
+/// Check a target before anything is written to it: a server URL must be
+/// https (or loopback); a bucket must be reachable and support the
+/// conditional writes serverless vaults rely on.
+pub async fn check_target(target: &Target) -> Result<()> {
+    match target {
+        Target::Server(url) => ensure_server_url(url).map(|_| ()),
+        Target::S3(s3) => crate::bucket::check_s3(s3).await.context("checking the S3 bucket"),
+    }
+}
+
+fn new_profile(target: &Target, vault: &str, device_name: &str, secret: &DeviceSecret) -> Result<Profile> {
+    match target {
+        Target::Server(url) => Profile::new(vault, url, device_name, secret),
+        Target::S3(s3) => Profile::new_s3(vault, s3.clone(), device_name, secret),
+    }
 }
 
 /// Short code derived from the vault key; compare it across devices to make
@@ -78,11 +128,12 @@ fn device_info(secret: &DeviceSecret, name: &str) -> Result<DeviceInfo> {
 }
 
 /// A fresh recovery identity and the v2 kit holding it.
-fn make_kit(server: &str, vault: &str, epoch: u32, vk: &VaultKey, password: &str) -> Result<(RecoveryKit, DeviceSecret)> {
+fn make_kit(target: &Target, vault: &str, epoch: u32, vk: &VaultKey, password: &str) -> Result<(RecoveryKit, DeviceSecret)> {
     let rec = DeviceSecret::generate();
     let kit = RecoveryKit {
         format: KIT_V2.into(),
-        server: server.trim_end_matches('/').into(),
+        server: target.describe(),
+        s3: KitBucket::of(target),
         vault: vault.into(),
         vault_fingerprint: vault_fingerprint(vk),
         password_slot: crypto::wrap_with_password(password, &zeroize::Zeroizing::new(serde_json::to_vec(&rec)?))?,
@@ -117,15 +168,16 @@ pub struct InitOutcome {
     pub vault_fingerprint: String,
 }
 
+/// Create a vault. `admin_token` is only needed on a server; in a bucket,
+/// holding its credentials is enough.
 pub async fn init(
-    server: &str,
+    target: &Target,
     vault: &str,
     admin_token: &str,
     device_name: &str,
     password: &str,
     kit_path: &Path,
 ) -> Result<InitOutcome> {
-    ensure_server_url(server)?;
     crate::config::check_vault_id(vault)?;
     if kit_path.exists() {
         bail!("{} already exists; refusing to overwrite a recovery kit", kit_path.display());
@@ -138,9 +190,10 @@ pub async fn init(
 
     // Derive the recovery kit before talking to the server so a slow KDF
     // can't leave a vault without a kit.
-    let (kit, rec) = make_kit(server, vault, 0, &vk, password)?;
+    check_target(target).await?;
+    let (kit, rec) = make_kit(target, vault, 0, &vk, password)?;
 
-    let api = Api::new(server, vault, &info.device_id, None)?;
+    let api = Api::for_target(target, vault, &info.device_id, None)?;
     api.create_vault(
         admin_token,
         &CreateVaultRequest {
@@ -151,10 +204,10 @@ pub async fn init(
         },
     )
     .await
-    .context("creating vault on server")?;
+    .context("creating the vault")?;
     write_kit(kit_path, &kit)?;
 
-    let mut profile = Profile::new(vault, server, device_name, &secret)?;
+    let mut profile = new_profile(target, vault, device_name, &secret)?;
     profile.set_keyslot(&keyslot)?;
     let mut cfg = Config::load()?;
     cfg.upsert(profile.clone());
@@ -262,9 +315,13 @@ mod invite_file_tests {
 /// device. Returns the profile (saved without a keyslot) and the fingerprint to
 /// compare on the approving device. Without a code an earlier, still pending
 /// request is resumed; with one it is re-sent under the same device keys.
-pub async fn join_request(server: &str, vault: &str, device_name: &str, code: Option<&str>) -> Result<(Profile, String)> {
-    ensure_server_url(server)?;
+/// A serverless vault takes no code: the bucket's credentials let a device ask.
+pub async fn join_request(target: &Target, vault: &str, device_name: &str, code: Option<&str>) -> Result<(Profile, String)> {
     crate::config::check_vault_id(vault)?;
+    let serverless = matches!(target, Target::S3(_));
+    if !serverless {
+        check_target(target).await?;
+    }
     let code = match code {
         Some(c) => Some(normalize_invite_code(c).context("invite codes look like ABCD-EFGH (letters and digits, no 0/O/1/I)")?),
         None => None,
@@ -274,14 +331,21 @@ pub async fn join_request(server: &str, vault: &str, device_name: &str, code: Op
         Some(p) if !p.keyslot.is_empty() => bail!("vault {vault} is already set up on this device"),
         Some(p) => (p.clone(), p.secret()?),
         None => {
+            if serverless {
+                check_target(target).await?;
+            }
             let secret = DeviceSecret::generate();
-            (Profile::new(vault, server, device_name, &secret)?, secret)
+            (new_profile(target, vault, device_name, &secret)?, secret)
         }
     };
     let info = device_info(&secret, &profile.device_name)?;
     match code {
+        _ if serverless => {
+            let api = Api::for_profile(&profile, None)?;
+            api.join(info, "").await.context("sending join request")?;
+        }
         Some(code) => {
-            let api = Api::new(&profile.server, vault, &info.device_id, None)?;
+            let api = Api::for_profile(&profile, None)?;
             api.join(info, &code).await.context("sending join request")?;
         }
         None if cfg.vaults.iter().any(|p| p.vault == vault) => {} // resume the pending request
@@ -316,7 +380,7 @@ fn save_enrolled(mut profile: Profile, keys: &KeyState) -> Result<Profile> {
 /// Wait until an existing device approved us, then fetch and verify our keyslot.
 pub async fn join_wait(profile: Profile, timeout: Duration) -> Result<(Profile, String)> {
     let secret = Arc::new(profile.secret()?);
-    let api = Api::new(&profile.server, &profile.vault, &profile.device_id, Some(secret.clone()))?;
+    let api = Api::for_profile(&profile, Some(secret.clone()))?;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         match api.join_status().await? {
@@ -366,9 +430,16 @@ pub fn unlock_kit(kit: &RecoveryKit, password: &str) -> Result<DeviceSecret> {
     serde_json::from_slice(&raw).context("recovery kit is corrupt")
 }
 
-pub async fn recover(kit: &RecoveryKit, password: &str, server: Option<&str>, device_name: &str) -> Result<Profile> {
-    let server = server.unwrap_or(&kit.server);
-    ensure_server_url(server)?;
+/// Enroll this device with the recovery kit. `target` overrides where the kit
+/// says the vault is (a moved server); a serverless vault always needs it,
+/// since the kit doesn't hold the bucket's keys.
+pub async fn recover(kit: &RecoveryKit, password: &str, target: Option<&Target>, device_name: &str) -> Result<Profile> {
+    let target = match (target, &kit.s3) {
+        (Some(t), _) => t.clone(),
+        (None, None) => Target::Server(kit.server.clone()),
+        (None, Some(_)) => bail!("'{}' is a serverless vault: enter its bucket's access keys", kit.vault),
+    };
+    check_target(&target).await?;
     let raw = crypto::unwrap_with_password(password, &kit.password_slot).context("wrong recovery password")?;
     let secret = DeviceSecret::generate();
     let mut info = device_info(&secret, device_name)?;
@@ -382,7 +453,7 @@ pub async fn recover(kit: &RecoveryKit, password: &str, server: Option<&str>, de
         challenge: vec![],
         signature: vec![],
     };
-    let api = Api::new(server, &kit.vault, &device_id, None)?;
+    let api = Api::for_target(&target, &kit.vault, &device_id, None)?;
 
     if kit.format == KIT_V1 {
         let vk = VaultKey::from_bytes(&raw)?;
@@ -421,19 +492,19 @@ pub async fn recover(kit: &RecoveryKit, password: &str, server: Option<&str>, de
         api.enroll(&enroll).await.context("enrolling device")?;
     }
 
-    let authed = Api::new(server, &kit.vault, &device_id, Some(Arc::new(secret.clone())))?;
+    let authed = Api::for_target(&target, &kit.vault, &device_id, Some(Arc::new(secret.clone())))?;
     let (keys, ring) = fetch_ring(&authed, &secret, &kit.vault).await?;
     // The kit commits to the key of its epoch: the server can't substitute a
     // key of its own, because it can't build a chain back to that key.
     if kit.format == KIT_V2 && ring.key(kit.epoch).map(crypto::vault_commitment) != Some(kit.vault_commitment.clone()) {
         bail!("the server's key chain does not lead back to the key in the recovery kit; refusing it");
     }
-    let profile = Profile::new(&kit.vault, server, device_name, &secret)?;
+    let profile = new_profile(&target, &kit.vault, device_name, &secret)?;
     save_enrolled(profile, &keys)
 }
 
 pub fn authed_api(profile: &Profile) -> Result<Api> {
-    Api::new(&profile.server, &profile.vault, &profile.device_id, Some(Arc::new(profile.secret()?)))
+    Api::for_profile(profile, Some(Arc::new(profile.secret()?)))
 }
 
 pub fn find_device<'a>(devices: &'a [DeviceInfo], prefix: &str) -> Result<&'a DeviceInfo> {
@@ -533,7 +604,7 @@ pub async fn rotate(profile: &Profile, revoke: &[String], new_kit: Option<NewKit
 
         let (recovery_pub, kit) = match &new_kit {
             Some(nk) => {
-                let (kit, rec) = make_kit(&profile.server, &profile.vault, next.epoch(), vk, nk.password)?;
+                let (kit, rec) = make_kit(&Target::of(profile), &profile.vault, next.epoch(), vk, nk.password)?;
                 (rec.public()?, Some(kit))
             }
             None => {

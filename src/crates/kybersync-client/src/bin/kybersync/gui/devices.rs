@@ -241,8 +241,9 @@ impl Gui<'_> {
         self.devices.poll();
 
         ui.add_space(4.0);
+        let serverless = profile.serverless();
         ui.horizontal(|ui| {
-            if util::primary_button(ui, "Invite a device…").clicked() {
+            if !serverless && util::primary_button(ui, "Invite a device…").clicked() {
                 let p = profile.clone();
                 self.busy = Some(Busy::Invite(Job::spawn(self.core.rt.handle(), async move { setup::invite(&p).await })));
             }
@@ -259,6 +260,14 @@ impl Gui<'_> {
             }
         });
         util::hint(ui, "Every device here can read and write the vault. Revoking one rotates the key so it cannot read anything new.");
+        if serverless {
+            util::hint(
+                ui,
+                "To add a device: on it, choose Add vault → Join an existing vault → Serverless and enter this vault's bucket and keys. \
+                 Its request shows up here to approve. After revoking a device, also change the bucket's access keys \
+                 (Settings → Bucket access keys, on each remaining device): the revoked one still has them and could delete data.",
+            );
+        }
         ui.add_space(8.0);
 
         if let Some(e) = &self.devices.error {

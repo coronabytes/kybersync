@@ -2,12 +2,14 @@
 //! filesystem. The app (tray + window) lives in `src/bin/kybersync`.
 
 pub mod api;
+pub mod bucket;
 pub mod cache;
 pub mod config;
 pub mod engine;
 pub mod keys;
 pub mod logs;
 pub mod progress;
+pub mod s3sdk;
 pub mod setup;
 pub mod update;
 pub mod zip;

@@ -1,7 +1,7 @@
 //! API-level tests: authentication, authorization and storage semantics.
 
 use crate::api::{AppState, StorageBackend, router};
-use crate::store::Store;
+use kybersync_store::Store;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;

@@ -106,6 +106,8 @@ pub enum Busy {
     Unlock { vault: String, job: Job<()> },
     /// Turning a vault's password on, changing it or turning it off.
     Password { dialog: Box<lock::PasswordDialog>, job: Job<()> },
+    /// Checking new access keys for a serverless vault's bucket.
+    S3Keys { vault: String, job: Job<kybersync_client::config::S3Settings> },
 }
 
 pub struct Approved {
@@ -121,11 +123,12 @@ impl Busy {
             Busy::Reject(_) => "Rejecting the request…",
             Busy::Rotate(_) => "Rotating the vault key (this takes a moment)…",
             Busy::Restore(_) => "Restoring deleted files…",
-            Busy::Add(_) => "Talking to the server (deriving keys takes a moment)…",
+            Busy::Add(_) => "Setting up the vault (deriving keys takes a moment)…",
             Busy::Resend(_) => "Sending the join request…",
             Busy::Update(_) => "Downloading and checking the update…",
             Busy::Unlock { .. } => "Checking the password…",
             Busy::Password { .. } => "Saving the password (this takes a moment)…",
+            Busy::S3Keys { .. } => "Checking the keys with the bucket…",
         }
     }
 }
@@ -331,6 +334,11 @@ impl<'a> Gui<'a> {
                         self.core.start(i);
                     }
                 }
+            },
+            Busy::S3Keys { vault, mut job } => match job.poll() {
+                None => self.busy = Some(Busy::S3Keys { vault, job }),
+                Some(Err(e)) => self.fail("The bucket refused these keys", &e),
+                Some(Ok(s3)) => self.save_s3_keys(&vault, s3),
             },
             Busy::Password { dialog, mut job } => match job.poll() {
                 None => self.busy = Some(Busy::Password { dialog, job }),

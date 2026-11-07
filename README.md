@@ -14,7 +14,8 @@ stays in sync across all your devices, with a self-hosted server that never sees
 * **Post-quantum from end to end.** Key exchange, device authentication and transport all use the
   NIST post-quantum standards, combined with classical algorithms.
 * **A server that can't read anything.** The server stores opaque blobs and an encrypted log on
-  disk or in any S3-compatible bucket. It holds no keys.
+  disk or in any S3-compatible bucket. It holds no keys. Or skip the server: a
+  [serverless vault](#serverless-vaults-s3-no-server) keeps everything in an S3 bucket directly.
 * **Multi-device sync.** Changes usually arrive in under a second. Offline edits are kept and
   sent later, and conflicting edits keep both versions.
 * **Device control.** New devices join with a one-time invite and a fingerprint check. Revoking
@@ -243,6 +244,71 @@ out, the tray menu and the sidebar say so. **Settings → Updates → Install an
 the release zip, checks it against the SHA-256 that GitHub recorded, puts the new `kybersync.exe`
 in place of the running one and restarts. **Download zip** fetches the zip in the browser
 instead. Automatic checks can be turned off in the same section.
+
+## Serverless vaults (S3, no server)
+
+A vault can also live in an S3 bucket that every device uses directly, with no kybersync server
+anywhere. The client talks to S3 through the official AWS SDK for Rust. AWS S3 works, including
+the **AWS European Sovereign Cloud** (`eusc-de-east-1`), and so does any S3-compatible service
+that supports **conditional writes** (`If-None-Match: *` and `If-Match`), such as Cloudflare R2,
+MinIO and SeaweedFS. Requests are path-style or virtual-hosted, as you choose. Several vaults
+can share one bucket.
+
+**Set up.** Choose **Add vault → Create a new vault → S3 bucket (serverless)**, then pick the
+provider: *Amazon S3*, *Amazon S3, AWS European Sovereign Cloud* or *Other S3-compatible
+service*. For AWS you pick a region from a list and the SDK finds the endpoint
+(`s3.<region>.amazonaws.com`, or `s3.eusc-de-east-1.amazonaws.eu` for the sovereign cloud). For
+other services, enter the endpoint URL and region (`auto` for R2). The form shows the exact URL
+requests will go to. Then enter the bucket and an access key pair. kybersync checks that the
+bucket supports conditional writes before it creates anything. To add another
+device, choose **Join an existing vault → Serverless vault** on it and enter the same bucket,
+keys and vault name. Then approve it on a device that has the vault after comparing fingerprints,
+as usual.
+
+The keys only need object access to that one bucket. On AWS (in the European Sovereign Cloud,
+write the ARNs as `arn:aws-eusc:s3:::…`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": "arn:aws:s3:::my-vaults" },
+    { "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::my-vaults/*" }
+  ]
+}
+```
+
+Encryption, the key hierarchy, recovery kits, the tamper-evident log, trash and automatic
+maintenance work the same way. Without a server, these things change:
+
+| | With a server | Serverless |
+|---|---|---|
+| Changes from other devices | arrive in under a second | found by polling, every 5 seconds by default |
+| Who can write and delete | authorized devices only | anyone holding the bucket's keys (they still can't read anything) |
+| Revoking a device | rotates the vault key | rotates the vault key; **also replace the bucket's keys** (vault **Settings → Bucket access keys** on each remaining device), or the revoked device can still delete data |
+| Records under an old key epoch | refused by the server | each device refuses to write them; nothing stops a revoked device that still has the keys |
+| Replacing the recovery kit | needs the current kit | any device holding the vault key could do it |
+| New devices | one-time invite code | the bucket's keys |
+| Transport | post-quantum TLS from the server | whatever TLS the S3 service offers (contents stay end-to-end encrypted either way) |
+| Server info, storage used | shown on the Drive card | not shown |
+
+**Polling cost.** While a vault is mounted and nothing changes, a device sends one `HEAD` request
+per check plus a `GET` and a `HEAD` every 30 seconds, and no `LIST` or `PUT` requests. The interval
+is set per device under the vault's **Settings → Checking for changes**. At AWS Frankfurt prices
+($0.43 per million `GET`/`HEAD` requests), per device mounted around the clock:
+
+| Check every | Requests per day | Per month (approx.) |
+|---|---|---|
+| 2 s | 46,080 | $0.59 |
+| 5 s (default) | 20,160 | $0.26 |
+| 10 s | 11,520 | $0.15 |
+| 15 s | 8,640 | $0.11 |
+| 30 s | 5,760 | $0.07 |
+| 1 min | 2,880 | $0.04 |
+
+Other regions and providers differ (the AWS European Sovereign Cloud has its own price list).
+Uploads, storage and downloads are billed on top as usual.
 
 ## License
 

@@ -325,7 +325,7 @@ impl Engine {
     pub fn start(profile: Profile, rt: Handle) -> Result<Arc<Self>> {
         let ring = profile.keyring()?;
         let secret = Arc::new(profile.secret()?);
-        let api = Api::new(&profile.server, &profile.vault, &profile.device_id, Some(secret))?;
+        let api = Api::for_profile(&profile, Some(secret))?;
         let dir = vault_dir(&profile.vault);
         std::fs::create_dir_all(&dir)?;
         let chunks = profile.chunk_cache_dir();
@@ -700,7 +700,7 @@ impl Engine {
                     self.update_status(0);
                     let after = self.state.read().unwrap().chain.head;
                     tokio::select! {
-                        r = self.api.head(after, 30) => if let Err(e) = r { self.set_offline(&e); sleep_or_stop(&mut stop, 5).await; },
+                        r = self.api.head(after, crate::config::LONG_POLL_SECS) => if let Err(e) = r { self.set_offline(&e); sleep_or_stop(&mut stop, 5).await; },
                         _ = self.fetch_wake.notified() => {},
                         _ = stop.changed() => break,
                     }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/kybersync-core", "crates/kybersync-server", "crates/kybersync-client"]
+members = ["crates/kybersync-core", "crates/kybersync-store", "crates/kybersync-server", "crates/kybersync-client"]
 
 [workspace.package]
 version = "0.1.0"
