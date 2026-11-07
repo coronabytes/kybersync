@@ -6,7 +6,9 @@
 #
 # Push a tag like `v0.2.0` to publish: the client zip is attached to a GitHub
 # release and the server image is pushed to ghcr.io/<owner>/kybersync with the
-# version, major.minor and (for non-prerelease tags) `latest` tags.
+# version, major.minor and (for non-prerelease tags) `latest` tags. Nothing is
+# tagged or released until someone approves the `release` environment in the
+# run's page on GitHub (the builds run while it waits).
 # Running it by hand from the Actions tab builds the same things, keeps the
 # client zip as a workflow artifact and pushes the image tagged with the commit.
 name: Release
@@ -21,6 +23,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Manual sign-off for tag releases: the `release` environment requires a
+  # reviewer. Hand-started runs skip it.
+  approve:
+    name: Approve release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions: {}
+    steps:
+      - run: echo "Release ${{ github.ref_name }} approved"
+
   client:
     name: Windows client
     runs-on: windows-latest
@@ -134,7 +147,10 @@ jobs:
 
   server-manifest:
     name: Server image (multi-arch)
-    needs: server
+    needs: [server, approve]
+    # `approve` is skipped for hand-started runs; any failure (or a rejected
+    # approval) stops the tags from being published.
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

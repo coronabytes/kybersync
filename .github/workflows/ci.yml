@@ -1,0 +1,65 @@
+# Checks every pull request and every merge-queue group into main.
+# The job names are the required status checks in the `main` ruleset;
+# renaming a job means updating the ruleset too.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  # The server ships as a Linux image; build and test it there too
+  # (statvfs and the other cfg(unix) paths).
+  linux:
+    name: Test (Linux server)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
+      - name: Clippy
+        run: cargo clippy -p kybersync-core -p kybersync-server --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test -p kybersync-core -p kybersync-server --locked
