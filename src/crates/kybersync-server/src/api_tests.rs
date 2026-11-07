@@ -752,16 +752,21 @@ async fn joining_needs_a_fresh_invite_code() {
 
 #[tokio::test]
 async fn expired_invite_codes_are_refused() {
+    // The TTL is real wall-clock time, and the fresh code at the end has to
+    // survive a whole join (signature checks in a debug build, on a busy CI
+    // runner with the other tests in parallel). 50 ms was too tight for the
+    // Windows runner; keep a wide margin.
+    const TTL: Duration = Duration::from_secs(1);
     let dir = tempfile::tempdir().unwrap();
     let fs = object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap();
-    let state = AppState::new(Store::new(Arc::new(fs)), "admin".into()).with_invite_ttl(Duration::from_millis(50));
+    let state = AppState::new(Store::new(Arc::new(fs)), "admin".into()).with_invite_ttl(TTL);
     let app = router(Arc::new(state));
     let (a, rec_id, b) = (DeviceSecret::generate(), DeviceSecret::generate(), DeviceSecret::generate());
     let ta = create_v2(&app, &a, &rec_id, &VaultKey::generate()).await;
 
     let r: InviteResponse = json(call(&app, raw_req("POST", "/v1/vaults/v1/invites", &ta, vec![])).await).await;
-    assert_eq!(r.expires_in, 0);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(r.expires_in, TTL.as_secs());
+    tokio::time::sleep(TTL + Duration::from_millis(200)).await;
     assert_eq!(call(&app, join_req("v1", &r.code, &b, "b")).await.status(), StatusCode::FORBIDDEN);
     // Expired codes make room for new ones; a fresh one works.
     assert_eq!(join(&app, &ta, &b, "b").await, StatusCode::OK);
