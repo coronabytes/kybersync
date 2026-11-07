@@ -61,7 +61,7 @@ server understanding any of it.
 | Recovery kit                             | Argon2id (256 MiB, t=3, p=4) over a recovery identity (hybrid KEM + ML-DSA-65) |
 | Key rotation (revocation)                | new random key per epoch; older keys chained, sealed under the newer one |
 | Transport                                | rustls / aws-lc-rs with hybrid **X25519MLKEM768** key exchange |
-| Device secret at rest                    | Windows DPAPI (bound to the Windows user)        |
+| Device secret at rest                    | Windows DPAPI (bound to the Windows user), optionally also Argon2id over a vault password |
 
 Every algorithm here is post-quantum safe. Symmetric 256-bit keys keep at least 128-bit security
 against Grover's algorithm. The asymmetric parts use the NIST PQC standards (FIPS 203 and 204).
@@ -231,6 +231,12 @@ docker compose pull && docker compose up -d
 
 The vault's **Restore** tab brings back deleted files, and **Settings → Start with Windows** keeps
 the app running in the notification area.
+
+**Vault password.** By default your Windows sign-in is enough to mount a vault. Under the vault's
+**Settings → Password → Ask for a password**, this device's key is also sealed under a password
+(Argon2id), and mounting asks for it. The key stays in memory only while the vault is mounted.
+The setting applies to this device only, and the password can't be reset. If you forget it,
+remove the vault from the device and join it again.
 
 **Updates.** The app checks GitHub for a new release at startup and once a day. When one is
 out, the tray menu and the sidebar say so. **Settings → Updates → Install and restart** downloads

@@ -6,7 +6,7 @@ members = ["crates/kybersync-core", "crates/kybersync-server", "crates/kybersync
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-rust-version = "1.85"
+rust-version = "1.99"
 
 [workspace.dependencies]
 anyhow = "1"

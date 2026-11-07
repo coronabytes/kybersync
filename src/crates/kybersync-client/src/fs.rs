@@ -230,13 +230,12 @@ impl CryptFs {
 
     fn fill_from_entry(&self, info: &mut FileInfo, e: &Entry) {
         // Show live size/times of files that are open with unsaved changes.
-        if e.kind == Kind::File {
-            if let Some(f) = self.open.lock().unwrap().get(&e.id).cloned() {
+        if e.kind == Kind::File
+            && let Some(f) = self.open.lock().unwrap().get(&e.id).cloned() {
                 let d = f.data.lock().unwrap();
                 fill_file(info, e.id, &d);
                 return;
             }
-        }
         let (c, m) = if e.id == ROOT { (self.mounted_at, self.mounted_at) } else { (e.created, e.modified) };
         fill(info, e.id, e.kind, e.attributes, e.size, c, m, m);
     }
@@ -284,14 +283,14 @@ impl CryptFs {
         }
         if new_size > old {
             let old_n = chunk_count(old);
-            if old_n > 0 && old % CHUNK_SIZE as u64 != 0 {
+            if old_n > 0 && !old.is_multiple_of(CHUNK_SIZE as u64) {
                 self.materialize(d, old_n - 1, chunk_len(new_size, old_n - 1))?;
             }
             d.slots.resize_with(chunk_count(new_size), || Slot::Zero);
         } else {
             let new_n = chunk_count(new_size);
             d.slots.truncate(new_n);
-            if new_n > 0 && new_size % CHUNK_SIZE as u64 != 0 {
+            if new_n > 0 && !new_size.is_multiple_of(CHUNK_SIZE as u64) {
                 self.materialize(d, new_n - 1, chunk_len(new_size, new_n - 1))?;
             }
         }
@@ -627,13 +626,12 @@ impl FileSystemContext for CryptFs {
                 let deleting = self.deleting.lock().unwrap();
                 v.retain(|(_, e)| !deleting.contains(&e.id));
                 drop(deleting);
-                if context.node != ROOT {
-                    if let Some(me) = st.view.get(context.node) {
+                if context.node != ROOT
+                    && let Some(me) = st.view.get(context.node) {
                         v.push((".".into(), me.entry.clone()));
                         let parent = st.view.get(me.entry.parent).unwrap_or(me);
                         v.push(("..".into(), parent.entry.clone()));
                     }
-                }
                 v
             };
             let mut di: DirInfo = DirInfo::new();

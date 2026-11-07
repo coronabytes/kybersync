@@ -25,7 +25,13 @@ pub async fn refresh(profile: &Profile, api: &Api, ring: &KeyRing) -> Result<Opt
         return Ok(None);
     }
     let keyslot: WrappedKey = serde_json::from_slice(&slot).context("malformed keyslot")?;
-    let raw = crypto::unwrap_with_device(&profile.secret()?, &keyslot).context("keyslot was not wrapped for this device")?;
+    // The running engine's own copy: a password-protected vault may be
+    // locked again by the time this runs (unmounting while uploads finish).
+    let secret = match api.secret() {
+        Some(s) => s.clone(),
+        None => std::sync::Arc::new(profile.secret()?),
+    };
+    let raw = crypto::unwrap_with_device(&secret, &keyslot).context("keyslot was not wrapped for this device")?;
     let chain = api.keychain().await.context("fetching key chain")?;
     let new = KeyRing::from_chain(&profile.vault, epoch, VaultKey::from_bytes(&raw)?, &chain.links)
         .context("key chain is broken")?;

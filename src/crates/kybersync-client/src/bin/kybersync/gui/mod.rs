@@ -4,6 +4,7 @@
 
 mod add;
 mod devices;
+mod lock;
 mod settings;
 mod theme;
 mod util;
@@ -101,6 +102,10 @@ pub enum Busy {
     Resend(Job<String>),
     /// Downloading the update; the staged exe when done.
     Update(Job<std::path::PathBuf>),
+    /// Checking a vault's password, then it mounts.
+    Unlock { vault: String, job: Job<()> },
+    /// Turning a vault's password on, changing it or turning it off.
+    Password { dialog: Box<lock::PasswordDialog>, job: Job<()> },
 }
 
 pub struct Approved {
@@ -119,6 +124,8 @@ impl Busy {
             Busy::Add(_) => "Talking to the server (deriving keys takes a moment)…",
             Busy::Resend(_) => "Sending the join request…",
             Busy::Update(_) => "Downloading and checking the update…",
+            Busy::Unlock { .. } => "Checking the password…",
+            Busy::Password { .. } => "Saving the password (this takes a moment)…",
         }
     }
 }
@@ -130,6 +137,8 @@ pub enum Dialog {
     Invite { invite: setup::InviteFile, minutes: u64 },
     Approve { vault: String, device: DeviceInfo },
     Rotate(Box<devices::RotateDialog>),
+    Unlock(lock::UnlockDialog),
+    Password(Box<lock::PasswordDialog>),
 }
 
 /// An action confirmed through a dialog.
@@ -151,6 +160,8 @@ pub(super) enum Act {
     Confirmed,
     Approve { vault: String, device: DeviceInfo },
     Rotate(devices::RotateRequest),
+    Unlock { vault: String, password: String },
+    SetPassword(lock::PasswordChange),
 }
 
 pub struct Gui<'a> {
@@ -312,6 +323,29 @@ impl<'a> Gui<'a> {
                     }
                 },
             },
+            Busy::Unlock { vault, mut job } => match job.poll() {
+                None => self.busy = Some(Busy::Unlock { vault, job }),
+                Some(Err(e)) => self.dialog = Some(Dialog::Unlock(lock::UnlockDialog::new(vault, Some(format!("{e:#}"))))),
+                Some(Ok(())) => {
+                    if let Some(i) = self.core.find(&vault) {
+                        self.core.start(i);
+                    }
+                }
+            },
+            Busy::Password { dialog, mut job } => match job.poll() {
+                None => self.busy = Some(Busy::Password { dialog, job }),
+                Some(Err(e)) => self.dialog = Some(Dialog::Password(Box::new(dialog.failed(format!("{e:#}"))))),
+                Some(Ok(())) => {
+                    if let Err(e) = self.core.reload() {
+                        self.fail("Reloading the configuration failed", &e);
+                    }
+                    self.toast(match dialog.mode {
+                        lock::Mode::Enable => "Mounting this vault now asks for its password.",
+                        lock::Mode::Change => "Password changed.",
+                        lock::Mode::Disable => "Mounting this vault no longer asks for a password.",
+                    });
+                }
+            },
         }
         if self.busy.is_some() {
             ctx.request_repaint_after(Duration::from_millis(200));
@@ -388,6 +422,46 @@ impl<'a> Gui<'a> {
             let nk = kit.as_ref().map(|(pw, path, old)| setup::NewKit { password: pw, path, old: old.clone() });
             setup::rotate(&p, &req.revoke, nk).await
         })));
+    }
+
+    /// Check a vault's password off the UI thread (Argon2id takes a moment).
+    fn start_unlock(&mut self, vault: String, password: String) {
+        let Some(p) = self.profile(&vault) else { return };
+        let job = Job::spawn(self.core.rt.handle(), async move {
+            let password = zeroize::Zeroizing::new(password);
+            tokio::task::spawn_blocking(move || p.unlock(&password)).await?
+        });
+        self.busy = Some(Busy::Unlock { vault, job });
+    }
+
+    fn start_set_password(&mut self, change: lock::PasswordChange, dialog: Box<lock::PasswordDialog>) {
+        let job = Job::spawn(self.core.rt.handle(), async move {
+            tokio::task::spawn_blocking(move || {
+                let current = change.current.map(zeroize::Zeroizing::new);
+                let new = change.new.map(zeroize::Zeroizing::new);
+                let mut cfg = kybersync_client::config::Config::load()?;
+                let p = cfg.vaults.iter_mut().find(|p| p.vault == change.vault).ok_or_else(|| anyhow!("the vault is gone"))?;
+                p.set_password(current.as_deref().map(String::as_str), new.as_deref().map(String::as_str))?;
+                cfg.save()
+            })
+            .await?
+        });
+        self.busy = Some(Busy::Password { dialog, job });
+    }
+
+    /// Ask for the password of the next vault that wants to mount.
+    fn next_unlock(&mut self, ctx: &egui::Context) {
+        if self.busy.is_some() || self.dialog.is_some() || self.core.unlock_requests.is_empty() {
+            return;
+        }
+        let vault = self.core.unlock_requests.remove(0);
+        let Some(i) = self.core.find(&vault) else { return };
+        if !self.core.vaults[i].profile.locked() || self.core.vaults[i].mounted() {
+            return;
+        }
+        self.nav = Nav::Vault(vault.clone());
+        self.dialog = Some(Dialog::Unlock(lock::UnlockDialog::new(vault, None)));
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -599,6 +673,8 @@ impl<'a> Gui<'a> {
                     .inner
                 }
                 Dialog::Rotate(d) => d.show(ui, &rt),
+                Dialog::Unlock(d) => d.show(ui),
+                Dialog::Password(d) => d.show(ui),
             }
         });
         let should_close = resp.should_close();
@@ -612,6 +688,12 @@ impl<'a> Gui<'a> {
             }
             Act::Approve { vault, device } => self.start_approve(vault, device),
             Act::Rotate(req) => self.start_rotate(req),
+            Act::Unlock { vault, password } => self.start_unlock(vault, password),
+            Act::SetPassword(change) => {
+                if let Dialog::Password(d) = dialog {
+                    self.start_set_password(change, d);
+                }
+            }
         }
         // Escape or a click outside: only plain dialogs go away that easily.
         if should_close && matches!(self.dialog, Some(Dialog::Info { .. }) | Some(Dialog::Invite { .. })) {
@@ -675,6 +757,7 @@ impl eframe::App for Gui<'_> {
             self.tray.refresh(self.core);
         }
         self.poll_busy(ctx);
+        self.next_unlock(ctx);
         if let Nav::Vault(v) = &self.nav
             && self.core.find(v).is_none()
         {
