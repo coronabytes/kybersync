@@ -1,4 +1,4 @@
-//! Looking for new releases in the background: shortly after startup, then
+//! Looking for new releases in the background: right at startup, then
 //! daily while the app runs. The window shows the outcome under Settings and
 //! the tray menu offers the update once one is found.
 
@@ -9,8 +9,6 @@ use kybersync_client::update::{self, Update};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Handle;
 
-/// Mounting comes first; the check can wait a moment.
-const FIRST_CHECK: Duration = Duration::from_secs(20);
 const INTERVAL: Duration = Duration::from_secs(24 * 3600);
 const RETRY: Duration = Duration::from_secs(3600);
 
@@ -46,7 +44,8 @@ impl Updates {
             available: None,
             check: Check::NotYet,
             job: None,
-            next: Instant::now() + FIRST_CHECK,
+            // Right away: the check runs in the background, so it does not hold up mounting.
+            next: Instant::now(),
             show: false,
             restart: false,
         }

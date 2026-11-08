@@ -51,7 +51,7 @@ pub fn transfer(ui: &mut Ui, way: Way, d: &Direction, paused: bool, on_demand: b
     let busy = !d.idle() || (on_demand && d.active);
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
-        let c = if busy { theme::ACCENT } else { theme::TEXT_FAINT };
+        let c = if busy { theme::p().accent } else { theme::p().text_faint };
         let p = ui.painter();
         p.circle_filled(rect.center(), 18.0, theme::tint(c, if busy { 40 } else { 22 }));
         let (from, vec) = match way {
@@ -62,7 +62,7 @@ pub fn transfer(ui: &mut Ui, way: Way, d: &Direction, paused: bool, on_demand: b
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             let title = if way == Way::Up { "Upload" } else { "Download" };
-            ui.label(RichText::new(title).small().strong().color(theme::TEXT_WEAK));
+            ui.label(RichText::new(title).small().strong().color(theme::p().text_weak));
             if d.idle() {
                 let text = match (way, on_demand, d.active) {
                     (Way::Down, true, true) => "Opening files".to_string(),
@@ -70,7 +70,7 @@ pub fn transfer(ui: &mut Ui, way: Way, d: &Direction, paused: bool, on_demand: b
                     (Way::Up, ..) => "Nothing to upload".to_string(),
                     (Way::Down, false, _) => "Nothing to download".to_string(),
                 };
-                ui.label(RichText::new(text).size(15.0).color(if busy { theme::TEXT } else { theme::TEXT_WEAK }));
+                ui.label(RichText::new(text).size(15.0).color(if busy { theme::p().text } else { theme::p().text_weak }));
                 if let Some(r) = d.rate.filter(|_| d.active) {
                     hint(ui, &progress::rate(r));
                 }
@@ -82,7 +82,7 @@ pub fn transfer(ui: &mut Ui, way: Way, d: &Direction, paused: bool, on_demand: b
                     egui::ProgressBar::new(f)
                         .desired_height(6.0)
                         .desired_width(ui.available_width().min(320.0))
-                        .fill(if paused { theme::TEXT_FAINT } else { theme::ACCENT })
+                        .fill(if paused { theme::p().text_faint } else { theme::p().accent })
                         .corner_radius(CornerRadius::same(3)),
                 );
             }
@@ -100,11 +100,11 @@ pub fn transfer(ui: &mut Ui, way: Way, d: &Direction, paused: bool, on_demand: b
 /// with the current rates above and the time on hover.
 pub fn throughput(ui: &mut Ui, t: &Throughput, up_now: Option<f64>, down_now: Option<f64>) {
     ui.horizontal(|ui| {
-        for (name, color, now) in [("Upload", theme::UPLOAD, up_now), ("Download", theme::DOWNLOAD, down_now)] {
+        for (name, color, now) in [("Upload", theme::p().upload, up_now), ("Download", theme::p().download, down_now)] {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
             ui.painter().circle_filled(rect.center(), 4.0, color);
-            ui.label(RichText::new(name).small().strong().color(theme::TEXT_WEAK));
-            ui.label(RichText::new(now.map_or("idle".to_string(), progress::rate)).color(theme::TEXT));
+            ui.label(RichText::new(name).small().strong().color(theme::p().text_weak));
+            ui.label(RichText::new(now.map_or("idle".to_string(), progress::rate)).color(theme::p().text));
             ui.add_space(10.0);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -119,15 +119,15 @@ pub fn throughput(ui: &mut Ui, t: &Throughput, up_now: Option<f64>, down_now: Op
     let top = nice_ceiling(peak);
     for f in [0.0, 0.5, 1.0] {
         let y = rect.bottom() - f * rect.height();
-        p.hline(rect.x_range(), y, Stroke::new(1.0, if f == 0.0 { theme::BORDER_STRONG } else { theme::BORDER }));
+        p.hline(rect.x_range(), y, Stroke::new(1.0, if f == 0.0 { theme::p().border_strong } else { theme::p().border }));
     }
-    p.text(rect.left_top() + Vec2::new(2.0, 2.0), egui::Align2::LEFT_TOP, progress::rate(top), egui::FontId::proportional(11.0), theme::TEXT_FAINT);
+    p.text(rect.left_top() + Vec2::new(2.0, 2.0), egui::Align2::LEFT_TOP, progress::rate(top), egui::FontId::proportional(11.0), theme::p().text_faint);
     if n < 2 {
         return;
     }
     let x = |i: usize| rect.left() + rect.width() * i as f32 / (n - 1) as f32;
     let y = |v: f64| rect.bottom() - rect.height() * (v / top).clamp(0.0, 1.0) as f32;
-    for (values, color) in [(&t.down, theme::DOWNLOAD), (&t.up, theme::UPLOAD)] {
+    for (values, color) in [(&t.down, theme::p().download), (&t.up, theme::p().upload)] {
         if values.iter().all(|v| *v == 0.0) {
             continue;
         }
@@ -149,7 +149,7 @@ pub fn throughput(ui: &mut Ui, t: &Throughput, up_now: Option<f64>, down_now: Op
 
     if let Some(pos) = resp.hover_pos() {
         let i = (((pos.x - rect.left()) / rect.width() * (n - 1) as f32).round() as usize).min(n - 1);
-        p.vline(x(i), rect.y_range(), Stroke::new(1.0, theme::TEXT_FAINT));
+        p.vline(x(i), rect.y_range(), Stroke::new(1.0, theme::p().text_faint));
         let ago = match (n - i) as u64 * progress::STEP.as_secs() {
             s @ 0..60 => format!("{s} s ago"),
             s => format!("{} min {} s ago", s / 60, s % 60),
@@ -176,7 +176,7 @@ fn nice_ceiling(bytes_per_sec: f64) -> f64 {
 pub fn stat(ui: &mut Ui, title: &str, value: &str) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(RichText::new(title).small().strong().color(theme::TEXT_WEAK));
+        ui.label(RichText::new(title).small().strong().color(theme::p().text_weak));
         ui.label(RichText::new(value).size(15.0));
     });
 }
@@ -184,8 +184,8 @@ pub fn stat(ui: &mut Ui, title: &str, value: &str) {
 /// The drive letter in a small rounded badge.
 pub fn drive_badge(ui: &mut Ui, drive: &str) {
     egui::Frame::new()
-        .fill(theme::RAISED)
-        .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+        .fill(theme::p().raised)
+        .stroke(Stroke::new(1.0, theme::p().border_strong))
         .corner_radius(CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(8, 3))
         .show(ui, |ui| {
@@ -210,11 +210,11 @@ pub fn mono(ui: &mut Ui, s: &str) -> Response {
 }
 
 pub fn hint(ui: &mut Ui, s: &str) {
-    ui.label(RichText::new(s).small().color(theme::TEXT_WEAK));
+    ui.label(RichText::new(s).small().color(theme::p().text_weak));
 }
 
 pub fn error(ui: &mut Ui, s: &str) {
-    ui.colored_label(theme::DANGER, s);
+    ui.colored_label(theme::p().danger, s);
 }
 
 /// Grid cells don't wrap text; keep a form row's note as wide as its fields.
@@ -227,54 +227,49 @@ fn field_note(ui: &mut Ui, text: RichText) {
 
 /// A hint under a field in a form grid, wrapped to the field's width.
 pub fn field_hint(ui: &mut Ui, s: &str) {
-    field_note(ui, RichText::new(s).small().color(theme::TEXT_WEAK));
+    field_note(ui, RichText::new(s).small().color(theme::p().text_weak));
 }
 
 /// An error under a field in a form grid, wrapped to the field's width.
 pub fn field_error(ui: &mut Ui, s: &str) {
-    field_note(ui, RichText::new(s).color(theme::DANGER));
+    field_note(ui, RichText::new(s).color(theme::p().danger));
 }
 
 pub fn warning(ui: &mut Ui, s: &str) {
-    ui.colored_label(theme::WARN, s);
+    ui.colored_label(theme::p().warn, s);
 }
 
 /// The page title; `subtitle` goes beneath it in weak text.
 pub fn page_title(ui: &mut Ui, title: &str, subtitle: Option<&str>) {
     ui.label(RichText::new(title).size(24.0).strong());
     if let Some(s) = subtitle {
-        ui.label(RichText::new(s).color(theme::TEXT_WEAK));
+        ui.label(RichText::new(s).color(theme::p().text_weak));
     }
 }
 
 /// The filled accent button for a page's main action.
 pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
-    ui.add(egui::Button::new(RichText::new(text).color(Color32::WHITE).strong()).fill(theme::ACCENT).stroke(Stroke::NONE))
+    ui.add(egui::Button::new(RichText::new(text).color(Color32::WHITE).strong()).fill(theme::p().accent).stroke(Stroke::NONE))
 }
 
 /// A red button for destructive actions.
 pub fn danger_button(ui: &mut Ui, text: &str) -> Response {
-    ui.add(egui::Button::new(RichText::new(text).color(Color32::WHITE).strong()).fill(theme::DANGER).stroke(Stroke::NONE))
+    ui.add(egui::Button::new(RichText::new(text).color(Color32::WHITE).strong()).fill(theme::p().danger).stroke(Stroke::NONE))
 }
 
 /// A full-width sidebar entry; `light` adds a status dot in front.
 pub fn nav_item(ui: &mut Ui, selected: bool, light: Option<Light>, label: &str) -> Response {
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
-    let t = ui.ctx().animate_bool(resp.id, selected);
     let fill = if selected {
-        theme::tint(theme::ACCENT, 38)
+        theme::tint(theme::p().accent, 38)
     } else if resp.hovered() {
-        theme::RAISED
+        theme::p().raised
     } else {
         Color32::TRANSPARENT
     };
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
-    if t > 0.0 {
-        let bar = egui::Rect::from_min_size(rect.left_top() + Vec2::new(0.0, 8.0), Vec2::new(3.0, 18.0));
-        p.rect_filled(bar, CornerRadius::same(2), theme::tint(theme::ACCENT, (255.0 * t) as u8));
-    }
     let mut x = rect.left() + 12.0;
     if let Some(l) = light {
         let c = color(l);
@@ -283,9 +278,29 @@ pub fn nav_item(ui: &mut Ui, selected: bool, light: Option<Light>, label: &str) 
         p.circle_filled(center, 3.5, c);
         x += 18.0;
     }
-    let text_color = if selected || resp.hovered() { theme::TEXT } else { theme::TEXT_WEAK };
+    let text_color = if selected || resp.hovered() { theme::p().text } else { theme::p().text_weak };
     p.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), text_color);
     resp
+}
+
+/// The sidebar's highlighted "update available" button: an accent glass
+/// pill with a glowing dot, the new version and what a click does.
+pub fn update_button(ui: &mut Ui, version: &str, installable: bool) -> Response {
+    let p = theme::p();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 50.0), Sense::click());
+    let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
+    let painter = ui.painter();
+    let fill = theme::tint(p.accent, (if p.dark { 46.0 } else { 34.0 } + 34.0 * hover) as u8);
+    painter.rect(rect, CornerRadius::same(theme::CARD_RADIUS), fill, Stroke::new(1.0, theme::tint(p.accent, 160)), egui::StrokeKind::Inside);
+    let dot = egui::pos2(rect.left() + 20.0, rect.center().y);
+    painter.circle_filled(dot, 9.0, theme::tint(p.accent, 55));
+    painter.circle_filled(dot, 4.5, p.accent);
+    let x = rect.left() + 38.0;
+    let title = format!("Update to {version}");
+    painter.text(egui::pos2(x, rect.center().y - 8.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), p.text);
+    let hint = if installable { format!("{} installed · click to update", crate::VERSION) } else { "see Settings".to_string() };
+    painter.text(egui::pos2(x, rect.center().y + 10.0), egui::Align2::LEFT_CENTER, hint, egui::FontId::proportional(11.5), p.text_weak);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// An underline-style tab bar; returns true when the tab changed.
@@ -297,7 +312,7 @@ pub fn tabs<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, items: &[(T, &str
         ui.spacing_mut().item_spacing.x = 4.0;
         for (tab, label) in items {
             let selected = *current == *tab;
-            let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(14.5), theme::TEXT);
+            let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(14.5), theme::p().text);
             let size = Vec2::new(galley.size().x + 24.0, 36.0);
             let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
             if resp.clicked() && !selected {
@@ -307,19 +322,19 @@ pub fn tabs<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, items: &[(T, &str
             let t = ui.ctx().animate_bool(resp.id, *current == *tab);
             let p = ui.painter();
             if resp.hovered() && !selected {
-                p.rect_filled(rect.shrink2(Vec2::new(0.0, 4.0)), CornerRadius::same(theme::RADIUS), theme::RAISED);
+                p.rect_filled(rect.shrink2(Vec2::new(0.0, 4.0)), CornerRadius::same(theme::RADIUS), theme::p().raised);
             }
-            let color = if selected || resp.hovered() { theme::TEXT } else { theme::TEXT_WEAK };
+            let color = if selected || resp.hovered() { theme::p().text } else { theme::p().text_weak };
             p.galley(rect.center() - galley.size() / 2.0, galley, color);
             if t > 0.0 {
                 let w = (rect.width() - 16.0) * t;
                 let bar = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.bottom() - 1.0), Vec2::new(w, 2.0));
-                p.rect_filled(bar, CornerRadius::same(1), theme::ACCENT);
+                p.rect_filled(bar, CornerRadius::same(1), theme::p().accent);
             }
         }
     });
     let y = ui.cursor().top() - ui.spacing().item_spacing.y;
-    ui.painter().hline(x0..=x0 + full, y, Stroke::new(1.0, theme::BORDER));
+    ui.painter().hline(x0..=x0 + full, y, Stroke::new(1.0, theme::p().border));
     ui.add_space(8.0);
     changed
 }
@@ -346,23 +361,24 @@ pub fn section<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R
     r
 }
 
-/// A rounded, bordered panel.
+/// A rounded pane of frosted glass with a lit top edge.
 pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    egui::Frame::new()
-        .fill(theme::CARD)
-        .stroke(Stroke::new(1.0, theme::BORDER))
+    let r = egui::Frame::new()
+        .fill(theme::p().card)
+        .stroke(Stroke::new(1.0, theme::p().border))
         .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             add(ui)
-        })
-        .inner
+        });
+    theme::highlight(ui.painter(), r.response.rect, theme::CARD_RADIUS as f32);
+    r.inner
 }
 
 /// A tinted banner for notices; red when `error`.
 pub fn banner(ui: &mut Ui, error: bool, add: impl FnOnce(&mut Ui)) {
-    let c = if error { theme::DANGER } else { theme::ACCENT };
+    let c = if error { theme::p().danger } else { theme::p().accent };
     egui::Frame::new()
         .fill(theme::tint(c, 22))
         .stroke(Stroke::new(1.0, theme::tint(c, 80)))

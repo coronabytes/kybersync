@@ -3,6 +3,7 @@
 //! Closing the window leaves the app in the tray.
 
 mod add;
+mod backdrop;
 mod devices;
 mod lock;
 mod settings;
@@ -40,7 +41,9 @@ pub fn run(core: &mut Core, tray: &mut Tray, select: Option<String>) -> Result<(
             // still fits a 1080p screen at 150 % scaling.
             .with_inner_size([1120.0, 680.0])
             .with_min_inner_size([780.0, 520.0])
-            .with_icon(icon::window()),
+            .with_icon(icon::window())
+            // See-through, so the acrylic backdrop shows behind the panels.
+            .with_transparent(true),
         run_and_return: true,
         centered: true,
         persist_window: false,
@@ -55,7 +58,9 @@ pub fn run(core: &mut Core, tray: &mut Tray, select: Option<String>) -> Result<(
         options,
         Box::new(move |cc| {
             wake::set_ctx(Some(cc.egui_ctx.clone()));
-            theme::apply(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx, backdrop::enable(cc));
+            let appearance = kybersync_client::config::Config::load().map(|c| c.appearance).unwrap_or_default();
+            cc.egui_ctx.set_theme(theme::preference(appearance));
             Ok(Box::new(Gui::new(core, tray, nav)))
         }),
     )
@@ -70,7 +75,7 @@ fn wordmark(ui: &mut egui::Ui) {
         ui.add_space(10.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
         let p = ui.painter();
-        p.rect_filled(rect, egui::CornerRadius::same(8), theme::ACCENT);
+        p.rect_filled(rect, egui::CornerRadius::same(8), theme::p().accent);
         let c = rect.center();
         // Shackle: a ring clipped to its upper half.
         let shackle = egui::Rect::from_center_size(egui::pos2(c.x, c.y - 3.0), egui::vec2(11.0, 11.0));
@@ -78,7 +83,7 @@ fn wordmark(ui: &mut egui::Ui) {
             .circle_stroke(shackle.center(), 4.5, egui::Stroke::new(2.0, egui::Color32::WHITE));
         let body = egui::Rect::from_center_size(egui::pos2(c.x, c.y + 3.5), egui::vec2(13.0, 10.0));
         p.rect_filled(body, egui::CornerRadius::same(2), egui::Color32::WHITE);
-        p.circle_filled(egui::pos2(c.x, c.y + 3.0), 1.6, theme::ACCENT);
+        p.circle_filled(egui::pos2(c.x, c.y + 3.0), 1.6, theme::p().accent);
         ui.add_space(2.0);
         ui.label(RichText::new("kybersync").size(19.0).strong());
     });
@@ -474,14 +479,15 @@ impl<'a> Gui<'a> {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let mut next: Option<Nav> = None;
-        let frame = egui::Frame::new().fill(theme::SIDEBAR).inner_margin(egui::Margin::symmetric(12, 16));
+        let mut install = false;
+        let frame = egui::Frame::new().fill(theme::p().sidebar).inner_margin(egui::Margin::symmetric(12, 16));
         egui::Panel::left("nav").exact_size(240.0).resizable(false).show_separator_line(false).frame(frame).show(ui, |ui| {
-            ui.painter().vline(ui.max_rect().right() + 12.0, ui.max_rect().y_range(), egui::Stroke::new(1.0, theme::BORDER));
+            ui.painter().vline(ui.max_rect().right() + 12.0, ui.max_rect().y_range(), egui::Stroke::new(1.0, theme::p().border));
             wordmark(ui);
             ui.add_space(22.0);
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                ui.label(RichText::new("VAULTS").size(11.0).strong().color(theme::TEXT_FAINT));
+                ui.label(RichText::new("VAULTS").size(11.0).strong().color(theme::p().text_faint));
             });
             ui.add_space(4.0);
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -499,24 +505,41 @@ impl<'a> Gui<'a> {
             }
             ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    ui.label(RichText::new(format!("version {}", crate::VERSION)).small().color(theme::TEXT_FAINT));
-                });
-                if let Some(u) = &self.core.updates.available {
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        let text = RichText::new(format!("Update to {} available", u.version)).small().color(theme::ACCENT);
-                        if ui.link(text).clicked() {
-                            next = Some(Nav::Settings);
+                let ups = &self.core.updates;
+                match &ups.available {
+                    // A found update takes the version's place, and one
+                    // click installs it (or, without a Windows build, shows
+                    // the details under Settings).
+                    Some(u) => {
+                        if util::update_button(ui, &u.version.to_string(), u.installable()).clicked() {
+                            if u.installable() {
+                                install = true;
+                            } else {
+                                next = Some(Nav::Settings);
+                            }
                         }
-                    });
+                    }
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.add_space(12.0);
+                            let faint = theme::p().text_faint;
+                            ui.label(RichText::new(format!("version {}", crate::VERSION)).small().color(faint));
+                            if ups.running() {
+                                ui.add(egui::Spinner::new().size(10.0).color(faint));
+                                ui.label(RichText::new("checking for updates").small().color(faint));
+                            }
+                        });
+                    }
                 }
+                ui.add_space(4.0);
                 if util::nav_item(ui, self.nav == Nav::Settings, None, "Settings").clicked() {
                     next = Some(Nav::Settings);
                 }
             });
         });
+        if install {
+            self.run_pending(&ui.ctx().clone(), Pending::Update);
+        }
         if let Some(n) = next {
             if n != self.nav && matches!(n, Nav::Vault(_)) {
                 self.vault_tab = vault::Tab::Overview;
@@ -528,7 +551,7 @@ impl<'a> Gui<'a> {
     fn central(&mut self, ui: &mut egui::Ui) {
         // The right margin is inside the scroll area, so its scrollbar runs
         // along the window edge instead of over the page.
-        let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 32, right: 0, top: 24, bottom: 0 });
+        let frame = egui::Frame::new().inner_margin(egui::Margin { left: 32, right: 0, top: 24, bottom: 0 });
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 egui::Frame::new().inner_margin(egui::Margin { right: 32, ..Default::default() }).show(ui, |ui| {
@@ -629,13 +652,13 @@ impl<'a> Gui<'a> {
                     ui.add_space(10.0);
                     ui.label(RichText::new("Or type it in by hand").strong());
                     egui::Frame::new()
-                        .fill(theme::FIELD)
-                        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                        .fill(theme::p().field)
+                        .stroke(egui::Stroke::new(1.0, theme::p().border))
                         .corner_radius(egui::CornerRadius::same(theme::RADIUS))
                         .inner_margin(egui::Margin::symmetric(16, 10))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(code.as_str()).monospace().size(28.0).strong().color(theme::ACCENT));
+                                ui.label(RichText::new(code.as_str()).monospace().size(28.0).strong().color(theme::p().accent));
                                 ui.add_space(8.0);
                                 if ui.button("Copy").clicked() {
                                     ui.ctx().copy_text(code.clone());
@@ -718,8 +741,8 @@ impl<'a> Gui<'a> {
         let text = text.clone();
         egui::Area::new(Id::unique("toast")).anchor(Align2::RIGHT_BOTTOM, [-20.0, -20.0]).show(ctx, |ui| {
             egui::Frame::new()
-                .fill(theme::RAISED)
-                .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+                .fill(theme::p().raised)
+                .stroke(egui::Stroke::new(1.0, theme::p().border_strong))
                 .corner_radius(egui::CornerRadius::same(theme::RADIUS))
                 .inner_margin(egui::Margin::symmetric(14, 10))
                 .shadow(ui.style().visuals.popup_shadow)
@@ -735,10 +758,18 @@ impl<'a> Gui<'a> {
 }
 
 impl eframe::App for Gui<'_> {
+    /// Clear to nothing: [`theme::paint_background`] paints the base, so the
+    /// acrylic backdrop can show through it.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
         ctx.request_repaint_after(Duration::from_secs(1));
+        theme::sync(ctx);
+        theme::paint_background(ctx);
 
         while let Some(ev) = self.tray.poll() {
             match self.tray.handle(self.core, ev) {

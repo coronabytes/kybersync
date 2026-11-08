@@ -27,6 +27,26 @@ pub struct Config {
     /// field (and a fresh config) means checking is on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_update_check: bool,
+    /// Light or dark window; following Windows unless chosen.
+    #[serde(default, skip_serializing_if = "Appearance::is_system")]
+    pub appearance: Appearance,
+}
+
+/// The window's colour scheme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// Whatever Windows uses for apps.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    fn is_system(&self) -> bool {
+        *self == Appearance::System
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
