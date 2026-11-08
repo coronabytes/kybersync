@@ -89,7 +89,12 @@ impl Gui<'_> {
             ui.add_space(6.0);
             util::status_chip(ui, light, &self.core.vaults[i].status_short());
         });
-        ui.label(egui::RichText::new(format!("{}   ·   this device: {}", profile.server, profile.device_name)).color(theme::TEXT_WEAK));
+        // Only the kind of storage here; the bucket or full URL is on the Settings tab.
+        let location = match &profile.s3 {
+            Some(s3) => format!("Serverless on {}", s3.provider()),
+            None => profile.server.split_once("://").map_or(profile.server.as_str(), |(_, host)| host).trim_end_matches('/').to_string(),
+        };
+        ui.label(egui::RichText::new(format!("{location}   ·   this device: {}", profile.device_name)).color(theme::TEXT_WEAK));
         ui.add_space(14.0);
 
         if self.core.vaults[i].pending() {
@@ -156,11 +161,11 @@ impl Gui<'_> {
                 }
                 let ok = serverless || !self.vault_page.resend_code.trim().is_empty();
                 if ui.add_enabled(ok, egui::Button::new("Send again")).clicked() {
-                    let code = self.vault_page.resend_code.trim().to_string();
+                    let code = (!serverless).then(|| self.vault_page.resend_code.trim().to_string());
                     let p = profile.clone();
                     self.busy = Some(Busy::Resend(Job::spawn(self.core.rt.handle(), async move {
                         let target = kybersync_client::api::Target::of(&p);
-                        let (_, fp) = setup::join_request(&target, &p.vault, &p.device_name, Some(&code)).await?;
+                        let (_, fp) = setup::join_request(&target, &p.vault, &p.device_name, code.as_deref()).await?;
                         Ok(fp)
                     })));
                 }
@@ -232,11 +237,9 @@ impl Gui<'_> {
                 ui.add_space(6.0);
                 let info = e.server_info();
                 let version = if info.version.is_empty() { "—" } else { &info.version };
-                if let Some(s3) = &e.profile.s3 {
-                    ui.columns(2, |cols| {
-                        util::stat(&mut cols[0], "Serverless, in bucket", &s3.bucket);
-                        util::stat(&mut cols[1], "Your files, encrypted", &util::size(e.encrypted_size()));
-                    });
+                if e.profile.s3.is_some() {
+                    // The header already says where the vault lives.
+                    util::stat(ui, "Your files, encrypted", &util::size(e.encrypted_size()));
                 } else if info.backend == "s3" {
                     // The server doesn't count an S3 bucket; size up the files here.
                     ui.columns(3, |cols| {
@@ -510,7 +513,7 @@ impl Gui<'_> {
                 ui.label("Local copy");
                 ui.vertical(|ui| {
                     ui.checkbox(&mut s.prefetch, "Keep an encrypted copy of every file on this device");
-                    util::hint(ui, "Off: files are downloaded when opened and kept in a cache of limited size.");
+                    util::field_hint(ui, "Off: files are downloaded when opened and kept in a cache of limited size.");
                 });
                 ui.end_row();
                 ui.label("Cache limit");

@@ -315,7 +315,11 @@ impl Gui<'_> {
                             if ui.button("Reject").clicked() {
                                 self.dialog = Some(Dialog::Confirm {
                                     title: format!("Reject \"{}\"?", d.name),
-                                    text: "The join request is removed. The device can ask again with a new invite code.".into(),
+                                    text: if profile.serverless() {
+                                        "The join request is removed. The device can ask again.".into()
+                                    } else {
+                                        "The join request is removed. The device can ask again with a new invite code.".into()
+                                    },
                                     ok: "Reject".into(),
                                     danger: true,
                                     action: Pending::Reject { vault: profile.vault.clone(), device: d.clone() },

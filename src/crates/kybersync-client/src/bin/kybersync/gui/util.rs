@@ -217,6 +217,24 @@ pub fn error(ui: &mut Ui, s: &str) {
     ui.colored_label(theme::DANGER, s);
 }
 
+/// Grid cells don't wrap text; keep a form row's note as wide as its fields.
+fn field_note(ui: &mut Ui, text: RichText) {
+    ui.vertical(|ui| {
+        ui.set_max_width(FIELD_WIDTH);
+        ui.add(egui::Label::new(text).wrap());
+    });
+}
+
+/// A hint under a field in a form grid, wrapped to the field's width.
+pub fn field_hint(ui: &mut Ui, s: &str) {
+    field_note(ui, RichText::new(s).small().color(theme::TEXT_WEAK));
+}
+
+/// An error under a field in a form grid, wrapped to the field's width.
+pub fn field_error(ui: &mut Ui, s: &str) {
+    field_note(ui, RichText::new(s).color(theme::DANGER));
+}
+
 pub fn warning(ui: &mut Ui, s: &str) {
     ui.colored_label(theme::WARN, s);
 }
