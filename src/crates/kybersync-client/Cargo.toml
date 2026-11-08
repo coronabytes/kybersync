@@ -55,6 +55,10 @@ windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[build-dependencies]
+crc32fast = "1"
+flate2 = "1"
+
 [target.'cfg(windows)'.build-dependencies]
 winfsp = { version = "0.13", default-features = false, features = ["delayload"] }
 
