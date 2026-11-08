@@ -160,6 +160,17 @@ impl S3Settings {
         Ok(Zeroizing::new(String::from_utf8(raw.to_vec()).context("S3 secret key")?))
     }
 
+    /// The storage service, without bucket or account names, for at-a-glance display.
+    pub fn provider(&self) -> &'static str {
+        if self.endpoint.is_empty() {
+            if self.region.starts_with("eusc-") { "AWS European Sovereign Cloud" } else { "AWS" }
+        } else if self.endpoint.contains(".r2.cloudflarestorage.com") {
+            "Cloudflare R2"
+        } else {
+            "S3-compatible storage"
+        }
+    }
+
     /// Where the vault lives, for display (`s3://bucket @ host`).
     pub fn describe(&self) -> String {
         let host = match self.endpoint.split_once("://") {

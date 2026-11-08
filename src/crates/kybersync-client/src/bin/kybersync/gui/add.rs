@@ -230,7 +230,7 @@ impl State {
                 self.s3_endpoint_value(),
                 &self.s3_region,
                 &self.s3_bucket,
-                self.s3_path_style,
+                self.s3_path_style_value(),
                 &self.s3_key_id,
                 &self.s3_secret,
             )?),
@@ -327,9 +327,11 @@ impl State {
         util::text(ui, &mut self.s3_bucket);
         ui.end_row();
 
-        ui.label("Addressing");
-        ui.checkbox(&mut self.s3_path_style, "Path-style requests (endpoint/bucket/key)");
-        ui.end_row();
+        if self.s3_provider == Provider::Compatible {
+            ui.label("Addressing");
+            ui.checkbox(&mut self.s3_path_style, "Path-style requests (endpoint/bucket/key)");
+            ui.end_row();
+        }
 
         ui.label("Requests go to");
         let bucket = if self.s3_bucket.trim().is_empty() { "bucket" } else { self.s3_bucket.trim() };
@@ -337,7 +339,7 @@ impl State {
             self.s3_endpoint_value(),
             self.s3_region.trim(),
             bucket,
-            self.s3_path_style,
+            self.s3_path_style_value(),
         ) {
             Ok(url) => ui.label(egui::RichText::new(url).monospace()),
             Err(e) => ui.colored_label(util::color(crate::icon::Light::Offline), e),
@@ -351,7 +353,7 @@ impl State {
         util::password(ui, &mut self.s3_secret);
         ui.end_row();
         ui.label("");
-        util::hint(
+        util::field_hint(
             ui,
             match self.s3_provider {
                 Provider::AwsSovereign => {
@@ -374,6 +376,11 @@ impl State {
             Provider::Compatible => self.s3_endpoint.trim(),
             Provider::Aws | Provider::AwsSovereign => "",
         }
+    }
+
+    /// AWS always gets virtual-hosted requests; path-style is only for other services.
+    fn s3_path_style_value(&self) -> bool {
+        self.s3_provider == Provider::Compatible && self.s3_path_style
     }
 
     /// Sensible defaults for a newly picked provider.
@@ -455,14 +462,14 @@ impl Gui<'_> {
                 }
                 ui.end_row();
                 ui.label("");
-                util::hint(ui, "1-64 characters: a-z, 0-9, '-' or '_'. Vault names are visible to the server or bucket.");
+                util::field_hint(ui, "1-64 characters: a-z, 0-9, '-' or '_'. Vault names are visible to the server or bucket.");
                 ui.end_row();
                 if a.kind == Kind::Server {
                     ui.label("Admin token");
                     util::password(ui, &mut a.admin_token);
                     ui.end_row();
                     ui.label("");
-                    util::hint(ui, "The server's KYBERSYNC_ADMIN_TOKEN; only creating a vault needs it.");
+                    util::field_hint(ui, "The server's KYBERSYNC_ADMIN_TOKEN; only creating a vault needs it.");
                     ui.end_row();
                 }
             });
@@ -617,9 +624,11 @@ impl Gui<'_> {
                     return;
                 }
             };
-            let (vault, code, name) = (a.vault.trim().to_string(), a.code.trim().to_string(), a.name.trim().to_string());
+            // A serverless vault takes no invite code.
+            let code = (a.kind == Kind::Server).then(|| a.code.trim().to_string());
+            let (vault, name) = (a.vault.trim().to_string(), a.name.trim().to_string());
             self.busy = Some(Busy::Add(Job::spawn(self.core.rt.handle(), async move {
-                setup::join_request(&target, &vault, &name, Some(&code)).await?;
+                setup::join_request(&target, &vault, &name, code.as_deref()).await?;
                 Ok(Done::Joined { vault })
             })));
         }
@@ -659,7 +668,7 @@ impl Gui<'_> {
                     }
                     Some(Err(e)) => {
                         ui.label("");
-                        util::error(ui, e);
+                        util::field_error(ui, e);
                         ui.end_row();
                     }
                     None => {}
@@ -674,7 +683,7 @@ impl Gui<'_> {
                     util::text(ui, &mut a.server);
                     ui.end_row();
                     ui.label("");
-                    util::hint(ui, "Leave empty to use the server stored in the kit.");
+                    util::field_hint(ui, "Leave empty to use the server stored in the kit.");
                     ui.end_row();
                 }
                 ui.label("Device name");

@@ -322,7 +322,9 @@ pub async fn join_request(target: &Target, vault: &str, device_name: &str, code:
     if !serverless {
         check_target(target).await?;
     }
+    // Any code given for a serverless vault (e.g. a stale one left in a form) is ignored.
     let code = match code {
+        _ if serverless => None,
         Some(c) => Some(normalize_invite_code(c).context("invite codes look like ABCD-EFGH (letters and digits, no 0/O/1/I)")?),
         None => None,
     };
