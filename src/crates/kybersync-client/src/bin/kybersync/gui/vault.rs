@@ -94,7 +94,7 @@ impl Gui<'_> {
             Some(s3) => format!("Serverless on {}", s3.provider()),
             None => profile.server.split_once("://").map_or(profile.server.as_str(), |(_, host)| host).trim_end_matches('/').to_string(),
         };
-        ui.label(egui::RichText::new(format!("{location}   ·   this device: {}", profile.device_name)).color(theme::TEXT_WEAK));
+        ui.label(egui::RichText::new(format!("{location}   ·   this device: {}", profile.device_name)).color(theme::p().text_weak));
         ui.add_space(14.0);
 
         if self.core.vaults[i].pending() {
@@ -457,8 +457,8 @@ impl Gui<'_> {
                 } else {
                     ui.label(format!("{} files ({}) and {} folders:", p.files.len(), util::size(p.bytes), p.dirs));
                     egui::Frame::new()
-                        .fill(theme::FIELD)
-                        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                        .fill(theme::p().field)
+                        .stroke(egui::Stroke::new(1.0, theme::p().border))
                         .corner_radius(egui::CornerRadius::same(theme::RADIUS))
                         .inner_margin(10)
                         .show(ui, |ui| {

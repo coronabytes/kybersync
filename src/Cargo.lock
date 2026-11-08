@@ -2480,6 +2480,7 @@ dependencies = [
  "kybersync-store",
  "object_store",
  "postcard",
+ "raw-window-handle",
  "reqwest",
  "rfd",
  "serde",
