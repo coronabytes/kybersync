@@ -27,6 +27,26 @@ pub struct Config {
     /// field (and a fresh config) means checking is on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_update_check: bool,
+    /// Light or dark window; following Windows unless chosen.
+    #[serde(default, skip_serializing_if = "Appearance::is_system")]
+    pub appearance: Appearance,
+}
+
+/// The window's colour scheme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// Whatever Windows uses for apps.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    fn is_system(&self) -> bool {
+        *self == Appearance::System
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -166,6 +186,17 @@ impl S3Settings {
         let blob = crypto::b64::decode(&self.secret_access_key)?;
         let raw = Zeroizing::new(dpapi::unprotect(&blob).context("DPAPI: cannot unprotect the S3 secret key (different Windows user?)")?);
         Ok(Zeroizing::new(String::from_utf8(raw.to_vec()).context("S3 secret key")?))
+    }
+
+    /// The storage service, without bucket or account names, for at-a-glance display.
+    pub fn provider(&self) -> &'static str {
+        if self.endpoint.is_empty() {
+            if self.region.starts_with("eusc-") { "AWS European Sovereign Cloud" } else { "AWS" }
+        } else if self.endpoint.contains(".r2.cloudflarestorage.com") {
+            "Cloudflare R2"
+        } else {
+            "S3-compatible storage"
+        }
     }
 
     /// Where the vault lives, for display (`s3://bucket @ host`).

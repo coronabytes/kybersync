@@ -212,7 +212,7 @@ impl RotateDialog {
             let mut act = Act::Keep;
             let label = if self.revoke.is_some() { "Revoke and rotate" } else { "Rotate" };
             let button = egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE).strong())
-                .fill(super::theme::DANGER)
+                .fill(super::theme::p().danger)
                 .stroke(egui::Stroke::NONE);
             if ui.add_enabled(ready, button).clicked() {
                 act = Act::Rotate(RotateRequest {
@@ -284,7 +284,7 @@ impl Gui<'_> {
         }
         util::card(ui, |ui| {
             let head = |ui: &mut egui::Ui, s: &str| {
-                ui.label(egui::RichText::new(s).small().strong().color(super::theme::TEXT_WEAK));
+                ui.label(egui::RichText::new(s).small().strong().color(super::theme::p().text_weak));
             };
             egui::Grid::new("devices").num_columns(5).striped(true).spacing([18.0, 10.0]).show(ui, |ui| {
                 head(ui, "DEVICE");
@@ -315,7 +315,11 @@ impl Gui<'_> {
                             if ui.button("Reject").clicked() {
                                 self.dialog = Some(Dialog::Confirm {
                                     title: format!("Reject \"{}\"?", d.name),
-                                    text: "The join request is removed. The device can ask again with a new invite code.".into(),
+                                    text: if profile.serverless() {
+                                        "The join request is removed. The device can ask again.".into()
+                                    } else {
+                                        "The join request is removed. The device can ask again with a new invite code.".into()
+                                    },
                                     ok: "Reject".into(),
                                     danger: true,
                                     action: Pending::Reject { vault: profile.vault.clone(), device: d.clone() },

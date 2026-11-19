@@ -5,13 +5,42 @@ use super::{theme, util};
 use crate::tray::open_path;
 use crate::updates::Check;
 use egui::RichText;
-use kybersync_client::config::{self, data_dir};
+use kybersync_client::config::{self, Appearance, data_dir};
 use kybersync_client::{autostart, logs};
 
 impl Gui<'_> {
     pub(super) fn settings_page(&mut self, ui: &mut egui::Ui) {
-        util::page_title(ui, "Settings", Some("How kybersync starts, where it writes its files, updates and quitting."));
+        util::page_title(ui, "Settings", Some("How kybersync looks and starts, where it writes its files, updates and quitting."));
         ui.add_space(6.0);
+
+        util::section(ui, "Appearance", |ui| {
+            let now = ui.ctx().options(|o| o.theme_preference);
+            let mut pick = now;
+            ui.horizontal(|ui| {
+                for (pref, label) in [
+                    (egui::ThemePreference::System, "Same as Windows"),
+                    (egui::ThemePreference::Light, "Light"),
+                    (egui::ThemePreference::Dark, "Dark"),
+                ] {
+                    ui.selectable_value(&mut pick, pref, label);
+                }
+            });
+            if pick != now {
+                ui.ctx().set_theme(pick);
+                let appearance = match pick {
+                    egui::ThemePreference::System => Appearance::System,
+                    egui::ThemePreference::Light => Appearance::Light,
+                    egui::ThemePreference::Dark => Appearance::Dark,
+                };
+                if let Err(e) = config::Config::load().and_then(|mut c| {
+                    c.appearance = appearance;
+                    c.save()
+                }) {
+                    self.fail("Saving the appearance failed", &e);
+                }
+            }
+            util::hint(ui, "The window is frosted glass over what is behind it on Windows 11.");
+        });
 
         util::section(ui, "Startup", |ui| {
             let mut on = autostart::enabled();
@@ -115,7 +144,7 @@ impl Gui<'_> {
                             .add_enabled(
                                 u.installable(),
                                 egui::Button::new(RichText::new("Install and restart").color(egui::Color32::WHITE).strong())
-                                    .fill(theme::ACCENT)
+                                    .fill(theme::p().accent)
                                     .stroke(egui::Stroke::NONE),
                             )
                             .on_disabled_hover_text("This release has no Windows zip.");
