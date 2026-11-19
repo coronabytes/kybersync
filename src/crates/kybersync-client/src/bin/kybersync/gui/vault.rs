@@ -8,7 +8,7 @@ use crate::jobs::{Job, finish};
 use crate::tray::open_path;
 use kybersync_client::config::{Config, Profile, S3Settings};
 use kybersync_client::fs::free_drives;
-use kybersync_client::setup;
+use kybersync_client::{setup, ssh_agent};
 use kybersync_core::crypto;
 use kybersync_core::proto::MaintenanceStatus;
 use kybersync_core::tree::RestorePlan;
@@ -48,6 +48,9 @@ pub struct Settings {
     prefetch: bool,
     cache_mb: u64,
     auto_maintenance: bool,
+    ssh_agent: bool,
+    /// As shown: normalized, `.ssh` when unset.
+    ssh_key_dir: String,
 }
 
 impl Settings {
@@ -58,6 +61,8 @@ impl Settings {
             prefetch: p.prefetch,
             cache_mb: p.cache_limit_mb,
             auto_maintenance: p.auto_maintenance,
+            ssh_agent: p.ssh_agent,
+            ssh_key_dir: ssh_agent::normalize_dir(&p.ssh_key_dir),
         }
     }
 }
@@ -480,7 +485,7 @@ impl Gui<'_> {
         let saved = Settings::from(&profile);
         self.notice(ui, i);
 
-        util::section(ui, "Mounting", |ui| {
+        let mounting_edit = util::section(ui, "Mounting", |ui| {
             let s = &mut self.vault_page.settings;
             // Each change is saved right away; the cache limit once it is no
             // longer being dragged or typed in.
@@ -520,10 +525,12 @@ impl Gui<'_> {
             });
             ui.add_space(6.0);
             util::hint(ui, "Changes apply right away; a mounted drive is remounted when the letter or the local copy changes.");
-            if *s != saved && !editing && !moving {
-                self.save_settings(i, &saved);
-            }
+            editing
         });
+        let ssh_edit = self.ssh_section(ui, i, &saved);
+        if self.vault_page.settings != saved && !mounting_edit && !ssh_edit && !moving {
+            self.save_settings(i, &saved);
+        }
 
         if let Some(s3) = &profile.s3 {
             util::section(ui, "Checking for changes", |ui| {
@@ -727,7 +734,84 @@ impl Gui<'_> {
         self.toast(done);
     }
 
+    /// The vault's SSH keys: on/off, the folder, and what the agent serves.
+    /// True while the folder is being typed in (not saved yet).
+    fn ssh_section(&mut self, ui: &mut egui::Ui, i: usize, saved: &Settings) -> bool {
+        let keys = self.core.ssh_keys(i);
+        let agent = self.core.agent.as_ref().map(|a| (a.serving(), a.problems()));
+        let drive = self.core.vaults[i].drive().map(str::to_string);
+        util::section(ui, "SSH keys", |ui| {
+            let s = &mut self.vault_page.settings;
+            ui.checkbox(&mut s.ssh_agent, "Use this vault's SSH keys for ssh, git and PuTTY");
+            let mut editing = false;
+            ui.add_enabled_ui(s.ssh_agent, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Key folder");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut s.ssh_key_dir)
+                            .hint_text(ssh_agent::DEFAULT_KEY_DIR)
+                            .desired_width(240.0),
+                    );
+                    editing = r.has_focus();
+                });
+            });
+            util::hint(
+                ui,
+                "A folder in this vault, from its root. The OpenSSH and PuTTY (.ppk) private keys in it are served while the vault is \
+                 mounted; unmounting or locking the vault removes them. Keys never leave memory. Keys protected with \
+                 a passphrase are skipped for now.",
+            );
+            let (Some(found), Some((serving, problems))) = (keys, agent) else { return editing };
+            if !saved.ssh_agent {
+                return editing;
+            }
+            ui.add_space(6.0);
+            for problem in problems {
+                util::banner(ui, true, |ui| {
+                    ui.label(problem);
+                });
+                ui.add_space(4.0);
+            }
+            let folder = match &drive {
+                Some(d) => format!("{d}\\{}", saved.ssh_key_dir),
+                None => saved.ssh_key_dir.clone(),
+            };
+            egui::Grid::new("ssh-keys").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                ui.label("Agent");
+                ui.label(serving.map_or("Not running (see above)".to_string(), |s| format!("Serving {s} clients")));
+                ui.end_row();
+                ui.label("Keys");
+                if drive.is_none() {
+                    ui.label("Loaded when the vault is mounted.");
+                } else if found.keys.is_empty() {
+                    ui.label(format!("None yet. Put OpenSSH or PuTTY (.ppk) private keys in {folder}."));
+                } else {
+                    ui.vertical(|ui| {
+                        for k in &found.keys {
+                            ui.label(egui::RichText::new(&k.comment).strong());
+                            util::mono(ui, &format!("{}  {}", k.algorithm(), k.fingerprint()));
+                        }
+                    });
+                }
+                ui.end_row();
+                if drive.is_some() && !found.skipped.is_empty() {
+                    ui.label("Skipped");
+                    ui.vertical(|ui| {
+                        for s in &found.skipped {
+                            ui.label(egui::RichText::new(&s.file).strong());
+                            ui.label(egui::RichText::new(&s.reason).color(theme::TEXT_WEAK));
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+            editing
+        })
+    }
+
     fn save_settings(&mut self, i: usize, before: &Settings) {
+        // Store the folder the way it's saved, or the next frame differs again.
+        self.vault_page.settings.ssh_key_dir = ssh_agent::normalize_dir(&self.vault_page.settings.ssh_key_dir);
         let s = self.vault_page.settings.clone();
         let vault = self.core.vaults[i].profile.vault.clone();
         let r = Config::load().and_then(|mut cfg| {
@@ -737,6 +821,9 @@ impl Gui<'_> {
                 p.prefetch = s.prefetch;
                 p.cache_limit_mb = s.cache_mb;
                 p.auto_maintenance = s.auto_maintenance;
+                p.ssh_agent = s.ssh_agent;
+                let dir = ssh_agent::normalize_dir(&s.ssh_key_dir);
+                p.ssh_key_dir = if dir == ssh_agent::DEFAULT_KEY_DIR { String::new() } else { dir };
             }
             cfg.save()
         });

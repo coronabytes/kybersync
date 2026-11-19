@@ -35,3 +35,10 @@ winfsp-sys = { path = "vendor/winfsp-sys" }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# The SSH agent tests generate RSA keys; unoptimized that takes about a minute.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3

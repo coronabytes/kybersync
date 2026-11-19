@@ -37,17 +37,27 @@ tracing-subscriber.workspace = true
 zeroize.workspace = true
 aws-sdk-s3 = { version = "1.157.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+# Built-in SSH agent (see src/ssh_agent).
+ssh-agent-lib = "0.6.0"
+ssh-key = { version = "0.6.7", features = ["ed25519", "ecdsa", "p256", "p384", "p521", "rsa", "encryption", "getrandom"] }
+rsa = { version = "0.9", features = ["sha2"] }
+base64.workspace = true
+hmac = "0.13"
+sha1 = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = { version = "0.26", default-features = false }
 winfsp = { version = "0.13", features = ["system"] }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Registry",
     "Win32_System_Threading",

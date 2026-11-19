@@ -72,6 +72,14 @@ pub struct Profile {
     /// `server` then only holds a description of it for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3: Option<S3Settings>,
+    /// Serve the SSH keys in [`Profile::ssh_key_dir`] through the built-in
+    /// SSH agent while mounted. Off unless turned on: the agent takes over
+    /// names (the OpenSSH pipe, Pageant) another agent may want.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ssh_agent: bool,
+    /// Vault folder holding those keys; empty means `.ssh` at the root.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ssh_key_dir: String,
 }
 
 /// Where a serverless vault keeps its data: an S3 bucket (AWS, the AWS
@@ -316,6 +324,8 @@ impl Profile {
             keyslot: String::new(),
             epoch: 0,
             s3: None,
+            ssh_agent: false,
+            ssh_key_dir: String::new(),
         })
     }
 
