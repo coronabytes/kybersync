@@ -6,9 +6,9 @@
 #
 # Push a tag like `v0.2.0` to publish: the client zip is attached to a GitHub
 # release and the server image is pushed to ghcr.io/<owner>/kybersync with the
-# version, major.minor and (for non-prerelease tags) `latest` tags. Nothing is
-# tagged or released until someone approves the `release` environment in the
-# run's page on GitHub (the builds run while it waits).
+# version, major.minor, major and (for non-prerelease tags) `latest` tags.
+# Nothing is tagged or released until someone approves the `release`
+# environment in the run's page on GitHub (the builds run while it waits).
 # Running it by hand from the Actions tab builds the same things, keeps the
 # client zip as a workflow artifact and pushes the image tagged with the commit.
 name: Release
@@ -112,6 +112,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
             type=sha
 
       # Push this architecture by digest only (no tags); the server-manifest
@@ -177,6 +178,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
             type=sha
 
       - name: Create manifest list and push
