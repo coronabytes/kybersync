@@ -18,8 +18,10 @@ ml-dsa.workspace = true
 ml-kem = { workspace = true, features = ["getrandom"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

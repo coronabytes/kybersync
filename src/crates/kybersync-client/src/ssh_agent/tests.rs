@@ -1,7 +1,7 @@
 use super::*;
 use ssh_agent_lib::proto::PublicCredential;
 use ssh_key::rand_core::OsRng;
-use rsa::signature::Verifier;
+use signature::Verifier;
 use ssh_key::private::KeypairData;
 use ssh_key::{LineEnding, PublicKey};
 

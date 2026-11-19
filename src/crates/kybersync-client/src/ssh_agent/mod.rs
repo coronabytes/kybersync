@@ -205,16 +205,24 @@ impl KeyStore {
 /// Sign `data`, honouring the RSA hash flags. SHA-1 RSA signatures
 /// (`ssh-rsa`) are refused; OpenSSH and PuTTY have asked for SHA-2 for years.
 fn sign_with(key: &PrivateKey, data: &[u8], flag: u32) -> Result<Signature, String> {
-    use ssh_key::rand_core::OsRng;
     let fail = |e: &dyn std::fmt::Display| format!("signing failed: {e}");
     match key.key_data() {
         KeypairData::Rsa(rsa_key) => {
+            use getrandom::SysRng;
+            use rsa::BoxedUint;
             use rsa::pkcs1v15::SigningKey;
             use rsa::sha2::{Sha256, Sha512};
             use rsa::signature::{RandomizedSigner, SignatureEncoding};
-            let n = |m: &ssh_key::Mpint| rsa::BigUint::try_from(m).map_err(|e| fail(&e));
-            // Built by hand: ssh-key 0.6's own conversion passes `p` twice.
-            let private = rsa::RsaPrivateKey::from_components(
+            // Every number at the modulus' size, in whole 64-bit limbs.
+            let modulus = rsa_key.public.n.as_positive_bytes().ok_or("RSA modulus is not positive")?;
+            let bits = (modulus.len() * 8).next_multiple_of(64) as u32;
+            let n = |m: &ssh_key::Mpint| {
+                let bytes = m.as_positive_bytes().ok_or_else(|| fail(&"negative RSA parameter"))?;
+                BoxedUint::from_be_slice(bytes, bits).map_err(|e| fail(&format!("{e:?}")))
+            };
+            // Built by hand: ssh-key 0.6 converts only to rsa 0.9 (and passes
+            // `p` twice there).
+            let private = rsa::PrivateKey::from_components(
                 n(&rsa_key.public.n)?,
                 n(&rsa_key.public.e)?,
                 n(&rsa_key.private.d)?,
@@ -222,9 +230,9 @@ fn sign_with(key: &PrivateKey, data: &[u8], flag: u32) -> Result<Signature, Stri
             )
             .map_err(|e| fail(&e))?;
             let (alg, sig) = if flag & flags::RSA_SHA2_512 != 0 {
-                ("rsa-sha2-512", SigningKey::<Sha512>::new(private).try_sign_with_rng(&mut OsRng, data))
+                ("rsa-sha2-512", SigningKey::<Sha512>::new(private).try_sign_with_rng(&mut SysRng, data))
             } else if flag & flags::RSA_SHA2_256 != 0 {
-                ("rsa-sha2-256", SigningKey::<Sha256>::new(private).try_sign_with_rng(&mut OsRng, data))
+                ("rsa-sha2-256", SigningKey::<Sha256>::new(private).try_sign_with_rng(&mut SysRng, data))
             } else {
                 return Err("refusing a SHA-1 (ssh-rsa) signature; the client should ask for rsa-sha2-256/512".into());
             };
@@ -232,7 +240,7 @@ fn sign_with(key: &PrivateKey, data: &[u8], flag: u32) -> Result<Signature, Stri
             Signature::new(Algorithm::new(alg).map_err(|e| fail(&e))?, sig.to_vec()).map_err(|e| fail(&e))
         }
         KeypairData::Ed25519(_) | KeypairData::Ecdsa(_) => {
-            use rsa::signature::Signer;
+            use signature::Signer;
             key.try_sign(data).map_err(|e| fail(&e))
         }
         _ => Err(format!("{} keys are not supported", key.algorithm())),
