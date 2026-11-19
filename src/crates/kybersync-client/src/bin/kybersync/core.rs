@@ -10,6 +10,7 @@ use kybersync_client::config::{Config, Profile, remove_vault_folder, vault_dir};
 use kybersync_client::engine::{Engine, Status};
 use kybersync_client::progress::SyncProgress;
 use kybersync_client::fs::{Mount, mount};
+use kybersync_client::ssh_agent::{self, Agent, VaultKeys};
 use kybersync_client::{cache, setup};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,6 +49,9 @@ pub struct Vault {
     waiting: Option<Job<(Profile, String)>>,
     retry_wait_at: Option<Instant>,
     pub notice: Option<Notice>,
+    /// The vault's SSH keys, served by the agent while mounted, and the
+    /// folder they're read from.
+    ssh: Option<(String, VaultKeys)>,
 }
 
 fn capitalize(s: &str) -> String {
@@ -60,7 +64,7 @@ fn capitalize(s: &str) -> String {
 
 impl Vault {
     fn new(profile: Profile) -> Self {
-        Vault { profile, engine: None, mount: None, moving: None, waiting: None, retry_wait_at: None, notice: None }
+        Vault { profile, engine: None, mount: None, moving: None, waiting: None, retry_wait_at: None, notice: None, ssh: None }
     }
 
     /// The join request has not been approved yet.
@@ -187,6 +191,8 @@ impl Vault {
         if lock {
             self.profile.lock();
         }
+        // The keys go first, before the drive does.
+        self.ssh = None;
         if let Some(m) = self.mount.take() {
             m.unmount();
         }
@@ -222,20 +228,25 @@ pub struct Core {
     /// Vaults that were asked to mount but need their password first; the
     /// window asks for it, one at a time.
     pub unlock_requests: Vec<String>,
+    /// The built-in SSH agent; runs while any vault has it turned on.
+    pub agent: Option<Agent>,
 }
 
 impl Core {
     pub fn new(rt: Runtime) -> Result<Self> {
         let cfg = Config::load()?;
         let updates = Updates::new(&cfg);
-        Ok(Core {
+        let mut core = Core {
             rt,
             vaults: cfg.vaults.into_iter().map(Vault::new).collect(),
             quit: false,
             vaults_changed: false,
             updates,
             unlock_requests: Vec::new(),
-        })
+            agent: None,
+        };
+        core.sync_ssh_agent();
+        Ok(core)
     }
 
     /// Mount what should be mounted and watch pending join requests.
@@ -266,6 +277,7 @@ impl Core {
         match self.vaults[i].start(&self.rt) {
             Ok(()) => {
                 self.vaults[i].notice = None;
+                self.sync_ssh_agent();
                 true
             }
             Err(e) => {
@@ -273,6 +285,44 @@ impl Core {
                 false
             }
         }
+    }
+
+    /// Bring the SSH agent in line with the vaults' settings: it runs while
+    /// any vault has it turned on, and serves the key folder of each such
+    /// vault that is mounted. Call after mounting or a settings change.
+    pub fn sync_ssh_agent(&mut self) {
+        let wanted = self.vaults.iter().any(|v| v.profile.ssh_agent && !v.pending());
+        if !wanted {
+            for v in &mut self.vaults {
+                v.ssh = None;
+            }
+            self.agent = None;
+            return;
+        }
+        let agent = self.agent.get_or_insert_with(|| Agent::start(self.rt.handle()));
+        for v in &mut self.vaults {
+            let dir = ssh_agent::normalize_dir(&v.profile.ssh_key_dir);
+            let serve = v.profile.ssh_agent && v.mount.is_some();
+            match (&v.engine, &v.ssh) {
+                (Some(engine), current) if serve => {
+                    if current.as_ref().is_none_or(|(d, _)| *d != dir) {
+                        // The old folder's keys go before the new ones load.
+                        v.ssh = None;
+                        let keys = agent.attach(&v.profile.vault, &dir, engine.clone());
+                        v.ssh = Some((dir, keys));
+                    }
+                }
+                _ => v.ssh = None,
+            }
+        }
+    }
+
+    /// The SSH agent's view of vault `i`: `None` while it's off for the
+    /// vault, else the keys it serves from it and the files it skipped.
+    pub fn ssh_keys(&self, i: usize) -> Option<ssh_agent::Loaded> {
+        let v = &self.vaults[i];
+        let agent = self.agent.as_ref().filter(|_| v.profile.ssh_agent)?;
+        Some(agent.store.vault(&v.profile.vault))
     }
 
     /// Unmount vault `i`; a password-protected vault is locked again.
@@ -321,6 +371,7 @@ impl Core {
             }
         }
         self.vaults_changed = true;
+        self.sync_ssh_agent();
         Ok(())
     }
 
@@ -433,6 +484,7 @@ impl Core {
             }
         }
         self.vaults_changed = true;
+        self.sync_ssh_agent();
         tracing::info!(vault = v.profile.vault, "removed from this device");
         Ok(())
     }
@@ -441,6 +493,7 @@ impl Core {
         for i in 0..self.vaults.len() {
             self.stop(i);
         }
+        self.agent = None;
         self.rt.shutdown_timeout(Duration::from_secs(12));
     }
 }

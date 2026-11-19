@@ -9,7 +9,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum = "0.8"
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+axum-server = { version = "0.9", features = ["tls-rustls"] }
 blake3.workspace = true
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
